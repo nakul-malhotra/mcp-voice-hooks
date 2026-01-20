@@ -896,6 +896,80 @@ app.post('/api/speak-system', async (req: Request, res: Response) => {
 
 // Session Management Endpoints
 
+// GET /api/sessions - List all sessions (for browser UI)
+app.get('/api/sessions', (_req: Request, res: Response) => {
+  try {
+    const sessions = sessionManager.getActiveSessions();
+    const activeSession = sessions.find(s => s.voiceInputActive) || sessions[0];
+
+    const sessionData = sessions.map(session => ({
+      id: session.sessionId,
+      name: session.triggerWord,
+      triggerWord: session.triggerWord,
+      messages: [], // Messages are stored separately per session
+      isActive: session.voiceInputActive,
+      messageCount: session.getPendingCount(),
+      lastActivity: session.lastActivityAt,
+      sendMode: 'automatic' as const,
+    }));
+
+    res.json({
+      sessions: sessionData,
+      activeSessionId: activeSession?.sessionId || null,
+    });
+  } catch (error) {
+    debugLog(`[Sessions] Failed to list sessions: ${error}`);
+    res.status(500).json({
+      error: 'Failed to list sessions',
+      sessions: [],
+      activeSessionId: null,
+    });
+  }
+});
+
+// GET /api/debug/status - Debug endpoint for troubleshooting
+app.get('/api/debug/status', (_req: Request, res: Response) => {
+  try {
+    const sessions = sessionManager.getActiveSessions();
+
+    res.json({
+      server: {
+        port: HTTP_PORT,
+        uptime: process.uptime(),
+        nodeVersion: process.version,
+      },
+      sessions: {
+        count: sessions.length,
+        list: sessions.map(s => ({
+          id: s.sessionId,
+          triggerWord: s.triggerWord,
+          voiceInputActive: s.voiceInputActive,
+          voiceResponsesEnabled: s.voiceResponsesEnabled,
+          pendingCount: s.getPendingCount(),
+          isWaiting: s.isWaiting,
+          createdAt: s.createdAt,
+          lastActivityAt: s.lastActivityAt,
+        })),
+      },
+      endpoints: [
+        'GET /api/sessions - List all sessions',
+        'GET /api/sessions/active - Get active sessions',
+        'GET /api/sessions/:id - Get single session',
+        'POST /api/sessions/register - Register new session',
+        'DELETE /api/sessions/:id - Delete session',
+        'GET /api/debug/status - This endpoint',
+        'GET /api/utterances - Get utterances',
+        'GET /api/conversation - Get conversation',
+      ],
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get debug status',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // POST /api/sessions/register - Register a new session
 app.post('/api/sessions/register', async (req: Request, res: Response) => {
   const { triggerWord, triggerAliases } = req.body;
