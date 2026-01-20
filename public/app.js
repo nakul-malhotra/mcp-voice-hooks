@@ -121,12 +121,14 @@ class MessengerClient {
                     const activeSessions = data.sessions || [];
 
                     if (activeSessions.length === 0) {
-                        console.warn('No active sessions found');
+                        // Auto-register a new session
+                        console.log('No active sessions, registering new session...');
+                        await this.registerNewSession();
                     } else if (activeSessions.length === 1) {
-                        await this.addSession(activeSessions[0].id, activeSessions[0]);
-                        this.setActiveSession(activeSessions[0].id);
+                        await this.addSession(activeSessions[0].sessionId, activeSessions[0]);
+                        this.setActiveSession(activeSessions[0].sessionId);
                     } else {
-                        activeSessions.forEach(session => this.addSession(session.id, session));
+                        activeSessions.forEach(session => this.addSession(session.sessionId, session));
                         this.showSessionPicker(activeSessions);
                     }
                 }
@@ -136,6 +138,27 @@ class MessengerClient {
             setInterval(() => this.loadData(), 2000);
         } catch (error) {
             console.error('Failed to initialize sessions:', error);
+        }
+    }
+
+    async registerNewSession() {
+        try {
+            const response = await fetch(`${this.baseUrl}/api/sessions/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                await this.addSession(data.sessionId, data);
+                this.setActiveSession(data.sessionId);
+                console.log(`Registered new session: ${data.sessionId} (trigger: ${data.triggerWord})`);
+            } else {
+                console.error('Failed to register session:', await response.text());
+            }
+        } catch (error) {
+            console.error('Failed to register session:', error);
         }
     }
 
@@ -359,7 +382,8 @@ class MessengerClient {
 
     async notifySpeakDone() {
         try {
-            await fetch(`${this.baseUrl}/api/speak-done`, {
+            if (!this.activeSessionId) return;
+            await fetch(`${this.baseUrl}/api/speak-done?sessionId=${this.activeSessionId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({})
@@ -781,13 +805,12 @@ class MessengerClient {
                 return;
             }
 
-            const response = await fetch(`${this.baseUrl}/api/potential-utterances`, {
+            const response = await fetch(`${this.baseUrl}/api/potential-utterances?sessionId=${sessionId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     text,
-                    timestamp: new Date().toISOString(),
-                    sessionId
+                    timestamp: new Date().toISOString()
                 })
             });
 
@@ -977,7 +1000,11 @@ class MessengerClient {
 
     async deleteMessage(messageId) {
         try {
-            const response = await fetch(`${this.baseUrl}/api/utterances/${messageId}`, {
+            if (!this.activeSessionId) {
+                console.error('No active session');
+                return;
+            }
+            const response = await fetch(`${this.baseUrl}/api/utterances/${messageId}?sessionId=${this.activeSessionId}`, {
                 method: 'DELETE'
             });
 
@@ -1001,7 +1028,8 @@ class MessengerClient {
 
     async updateVoiceInputState(active) {
         try {
-            await fetch(`${this.baseUrl}/api/voice-input-state`, {
+            if (!this.activeSessionId) return;
+            await fetch(`${this.baseUrl}/api/voice-input-state?sessionId=${this.activeSessionId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ active })
@@ -1017,7 +1045,8 @@ class MessengerClient {
             localStorage.setItem('voiceResponsesEnabled', enabled.toString());
 
             // Update server
-            await fetch(`${this.baseUrl}/api/voice-preferences`, {
+            if (!this.activeSessionId) return;
+            await fetch(`${this.baseUrl}/api/voice-preferences?sessionId=${this.activeSessionId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ voiceResponsesEnabled: enabled })
