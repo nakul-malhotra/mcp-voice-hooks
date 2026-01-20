@@ -1,6 +1,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Message } from '../components/MessageBubble';
 
+const MILITARY_ALPHABET = [
+  'Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel',
+  'India', 'Juliet', 'Kilo', 'Lima', 'Mike', 'November', 'Oscar', 'Papa',
+  'Quebec', 'Romeo', 'Sierra', 'Tango', 'Uniform', 'Victor', 'Whiskey',
+  'X-ray', 'Yankee', 'Zulu',
+];
+
 interface Session {
   id: string;
   name?: string;
@@ -38,7 +45,7 @@ export const useSession = (baseUrl: string): UseSessionResult => {
           const data = await response.json();
           const sessionMap = new Map<string, Session>();
 
-          data.sessions.forEach((session: any) => {
+          data.sessions.forEach((session: any, index: number) => {
             sessionMap.set(session.id, {
               id: session.id,
               name: session.name,
@@ -47,7 +54,7 @@ export const useSession = (baseUrl: string): UseSessionResult => {
               messageCount: session.messages?.length || 0,
               lastActivity: session.lastActivity ? new Date(session.lastActivity) : undefined,
               sendMode: session.sendMode || 'automatic',
-              triggerWord: session.triggerWord || 'send',
+              triggerWord: session.triggerWord || MILITARY_ALPHABET[index % MILITARY_ALPHABET.length],
             });
           });
 
@@ -72,9 +79,19 @@ export const useSession = (baseUrl: string): UseSessionResult => {
       });
 
       if (response.ok) {
-        const newSession: Session = await response.json();
-        setSessions((prev) => new Map(prev).set(newSession.id, newSession));
-        setActiveSessionId(newSession.id);
+        const serverSession = await response.json();
+        setSessions((prev) => {
+          const sessionIndex = prev.size;
+          const newSession: Session = {
+            ...serverSession,
+            messages: serverSession.messages || [],
+            messageCount: serverSession.messages?.length || 0,
+            sendMode: serverSession.sendMode || 'automatic',
+            triggerWord: serverSession.triggerWord || MILITARY_ALPHABET[sessionIndex % MILITARY_ALPHABET.length],
+          };
+          return new Map(prev).set(newSession.id, newSession);
+        });
+        setActiveSessionId(serverSession.id);
       }
     } catch (error) {
       console.error('Failed to create session:', error);

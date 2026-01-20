@@ -189,6 +189,7 @@ export const App: React.FC = () => {
             name: s.name,
             messageCount: s.messageCount,
             isActive: s.isActive,
+            triggerWord: s.triggerWord,
           }))}
           activeSessionId={activeSessionId}
           onSessionChange={switchSession}

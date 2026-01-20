@@ -6,6 +6,7 @@ interface Session {
   messageCount: number;
   isActive: boolean;
   hasUnread?: boolean;
+  triggerWord?: string;
 }
 
 interface SessionTabsProps {
@@ -37,8 +38,9 @@ export const SessionTabs: React.FC<SessionTabsProps> = ({
                   : 'bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700'
               }
             `}
+            title={session.triggerWord ? `Trigger word: "${session.triggerWord}"` : undefined}
           >
-            {session.name || `Session ${session.id.slice(0, 6)}`}
+            <span className="font-bold">{session.triggerWord || 'Alpha'}</span>
             {session.hasUnread && (
               <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full" />
             )}
