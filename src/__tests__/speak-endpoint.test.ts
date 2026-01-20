@@ -98,6 +98,12 @@ describe('Speak Endpoint Integration Tests', () => {
       });
       expect(response.status).toBe(200);
 
+      // Call speak-done to complete first speak
+      await fetch(`${server.url}/api/speak-done`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
       // Disable voice responses
       await fetch(`${server.url}/api/voice-responses`, {
         method: 'POST',
@@ -127,6 +133,12 @@ describe('Speak Endpoint Integration Tests', () => {
         body: JSON.stringify({ text: 'Third test' })
       });
       expect(response.status).toBe(200);
+
+      // Call speak-done to complete third speak
+      await fetch(`${server.url}/api/speak-done`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
     });
   });
 

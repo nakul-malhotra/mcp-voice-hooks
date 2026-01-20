@@ -77,6 +77,93 @@
             overflow: hidden;
         }
 
+        /* Session Tabs */
+        .session-tabs {
+            display: none;
+            gap: 8px;
+            padding: 12px 20px;
+            background: #FAFAFA;
+            border-bottom: 1px solid #E0E0E0;
+            overflow-x: auto;
+        }
+
+        .session-tab {
+            padding: 8px 16px;
+            background: white;
+            border: 2px solid #DDD;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .session-tab:hover {
+            background: #F0F0F0;
+            border-color: #BBB;
+        }
+
+        .session-tab.active {
+            background: #007AFF;
+            color: white;
+            border-color: #007AFF;
+        }
+
+        /* Session Picker Modal */
+        .session-picker-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .session-picker-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+        }
+
+        .session-picker-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin: 0 0 16px 0;
+        }
+
+        .session-picker-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .session-picker-item {
+            padding: 12px 16px;
+            background: #F8F9FA;
+            border: 2px solid #E0E0E0;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            color: #333;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .session-picker-item:hover {
+            background: #E3F2FD;
+            border-color: #007AFF;
+            color: #007AFF;
+        }
+
         .conversation-header {
             display: flex;
             justify-content: space-between;
@@ -743,6 +830,9 @@
         <div class="main-content">
             <!-- Conversation Section -->
             <div class="conversation-section">
+                <!-- Session Tabs -->
+                <div id="sessionTabsContainer" class="session-tabs"></div>
+
                 <!-- Conversation Messages -->
                 <div id="conversationContainer" class="conversation-container">
                     <div id="conversationMessages" class="conversation-messages">
@@ -848,6 +938,14 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Session Picker Modal -->
+    <div id="sessionPickerModal" class="session-picker-modal">
+        <div class="session-picker-content">
+            <h2 class="session-picker-title">Select a Session</h2>
+            <div class="session-picker-list"></div>
         </div>
     </div>
 

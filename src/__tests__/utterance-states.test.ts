@@ -256,6 +256,12 @@ describe('utterance state transitions', () => {
         body: JSON.stringify({ text: 'First response' })
       });
 
+      // Call speak-done to complete first speak
+      await fetch(`${server.url}/api/speak-done`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
       // Second turn
       await fetch(`${server.url}/api/potential-utterances`, {
         method: 'POST',
@@ -272,6 +278,12 @@ describe('utterance state transitions', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: 'Second response' })
+      });
+
+      // Call speak-done to complete second speak
+      await fetch(`${server.url}/api/speak-done`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
       });
 
       // Final status

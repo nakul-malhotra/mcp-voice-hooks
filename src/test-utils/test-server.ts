@@ -117,6 +117,12 @@ interface VoicePreferences {
   voiceInputActive: boolean;
 }
 
+// TTS speaking lock
+interface SpeakRequest {
+  text: string;
+  resolve: () => void;
+}
+
 /**
  * TestServer provides a real HTTP server for integration testing.
  * It mimics the core functionality of unified-server.ts but with isolated state.
@@ -128,6 +134,8 @@ export class TestServer {
   private voicePreferences: VoicePreferences;
   private lastToolUseTimestamp: Date | null = null;
   private lastSpeakTimestamp: Date | null = null;
+  private isSpeaking: boolean = false;
+  private speakQueue: SpeakRequest[] = [];
   public port: number = 0;
   public url: string = '';
 
@@ -305,8 +313,17 @@ export class TestServer {
       }
 
       try {
-        // Use macOS say command for TTS (mocked in tests)
-        await execAsync(`say "${text.replace(/"/g, '\\"')}"`);
+        // If already speaking, queue this request
+        if (this.isSpeaking) {
+          await new Promise<void>((resolve) => {
+            this.speakQueue.push({ text, resolve });
+          });
+        } else {
+          // Not speaking, proceed immediately
+          this.isSpeaking = true;
+          // Simulate TTS (mocked in tests)
+          await execAsync(`say "${text.replace(/"/g, '\\"')}"`);
+        }
 
         // Store assistant's response in conversation history
         this.queue.addAssistantMessage(text);
@@ -329,6 +346,12 @@ export class TestServer {
           error: `Failed to speak: ${error instanceof Error ? error.message : String(error)}`
         });
       }
+    });
+
+    // POST /api/speak-done
+    this.app.post('/api/speak-done', (_req, res) => {
+      this.processNextInQueue();
+      res.json({ success: true });
     });
 
     // POST /api/speak-system (always works, uses Mac say command)
@@ -487,6 +510,22 @@ export class TestServer {
   }
 
   /**
+   * Process next item in speak queue
+   */
+  private processNextInQueue(): void {
+    if (this.speakQueue.length === 0) {
+      this.isSpeaking = false;
+      return;
+    }
+
+    const nextRequest = this.speakQueue.shift();
+    if (nextRequest) {
+      // Simulate TTS notification (mocked in tests)
+      nextRequest.resolve();
+    }
+  }
+
+  /**
    * Start the server on a random available port
    */
   async start(): Promise<void> {
@@ -552,5 +591,7 @@ export class TestServer {
     };
     this.lastToolUseTimestamp = null;
     this.lastSpeakTimestamp = null;
+    this.isSpeaking = false;
+    this.speakQueue = [];
   }
 }

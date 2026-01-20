@@ -5,6 +5,8 @@ class MessengerClient {
         // Conversation elements
         this.conversationMessages = document.getElementById('conversationMessages');
         this.conversationContainer = document.getElementById('conversationContainer');
+        this.sessionTabsContainer = document.getElementById('sessionTabsContainer');
+        this.sessionPickerModal = document.getElementById('sessionPickerModal');
 
         // Text input elements
         this.messageInput = document.getElementById('messageInput');
@@ -30,6 +32,11 @@ class MessengerClient {
         this.rateWarning = document.getElementById('rateWarning');
         this.systemVoiceInfo = document.getElementById('systemVoiceInfo');
 
+        // Multi-session state
+        this.sessions = new Map(); // sessionId -> session data
+        this.activeSessionId = null;
+        this.eventSources = new Map(); // sessionId -> EventSource
+
         // State
         this.sendMode = 'automatic'; // 'automatic' or 'trigger'
         this.triggerWord = 'send';
@@ -47,13 +54,9 @@ class MessengerClient {
         // Initialize
         this.initializeSpeechRecognition();
         this.initializeSpeechSynthesis();
-        this.initializeTTSEvents();
         this.setupEventListeners();
         this.loadPreferences();
-        this.loadData();
-
-        // Auto-refresh every 2 seconds
-        setInterval(() => this.loadData(), 2000);
+        this.initializeSessions();
     }
 
     debugLog(...args) {
@@ -103,27 +106,175 @@ class MessengerClient {
         }
     }
 
-    initializeTTSEvents() {
-        // Connect to SSE for TTS events
-        this.eventSource = new EventSource(`${this.baseUrl}/api/tts-events`);
+    async initializeSessions() {
+        try {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionIdFromUrl = urlParams.get('sessionId');
 
-        this.eventSource.onmessage = (event) => {
+            if (sessionIdFromUrl) {
+                await this.addSession(sessionIdFromUrl);
+                this.setActiveSession(sessionIdFromUrl);
+            } else {
+                const response = await fetch(`${this.baseUrl}/api/sessions/active`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const activeSessions = data.sessions || [];
+
+                    if (activeSessions.length === 0) {
+                        console.warn('No active sessions found');
+                    } else if (activeSessions.length === 1) {
+                        await this.addSession(activeSessions[0].id, activeSessions[0]);
+                        this.setActiveSession(activeSessions[0].id);
+                    } else {
+                        activeSessions.forEach(session => this.addSession(session.id, session));
+                        this.showSessionPicker(activeSessions);
+                    }
+                }
+            }
+
+            // Auto-refresh every 2 seconds
+            setInterval(() => this.loadData(), 2000);
+        } catch (error) {
+            console.error('Failed to initialize sessions:', error);
+        }
+    }
+
+    async addSession(sessionId, sessionData = null) {
+        if (this.sessions.has(sessionId)) return;
+
+        const session = sessionData || {
+            id: sessionId,
+            messages: [],
+            triggerWord: null
+        };
+
+        this.sessions.set(sessionId, session);
+        this.connectSSE(sessionId);
+        this.updateSessionTabs();
+    }
+
+    connectSSE(sessionId) {
+        if (this.eventSources.has(sessionId)) {
+            this.eventSources.get(sessionId).close();
+        }
+
+        const eventSource = new EventSource(`${this.baseUrl}/api/tts-events?sessionId=${sessionId}`);
+
+        eventSource.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
 
                 if (data.type === 'speak' && data.text) {
-                    this.speakText(data.text);
+                    if (this.activeSessionId === sessionId) {
+                        this.speakText(data.text);
+                    }
                 } else if (data.type === 'waitStatus') {
-                    this.handleWaitStatus(data.isWaiting);
+                    if (this.activeSessionId === sessionId) {
+                        this.handleWaitStatus(data.isWaiting);
+                    }
                 }
             } catch (error) {
                 console.error('Failed to parse TTS event:', error);
             }
         };
 
-        this.eventSource.onerror = (error) => {
-            console.error('SSE connection error:', error);
+        eventSource.onerror = (error) => {
+            console.error(`SSE connection error for session ${sessionId}:`, error);
         };
+
+        this.eventSources.set(sessionId, eventSource);
+    }
+
+    setActiveSession(sessionId) {
+        if (!this.sessions.has(sessionId)) return;
+
+        this.activeSessionId = sessionId;
+        this.updateSessionTabs();
+        this.loadData();
+    }
+
+    updateSessionTabs() {
+        if (!this.sessionTabsContainer || this.sessions.size <= 1) {
+            if (this.sessionTabsContainer) {
+                this.sessionTabsContainer.style.display = 'none';
+            }
+            return;
+        }
+
+        this.sessionTabsContainer.style.display = 'flex';
+        this.sessionTabsContainer.replaceChildren();
+
+        this.sessions.forEach((session, sessionId) => {
+            const tab = document.createElement('button');
+            tab.className = 'session-tab';
+
+            const label = session.name || session.triggerWord
+                ? (session.name || `Trigger: ${session.triggerWord}`)
+                : `Session ${sessionId.substring(0, 8)}`;
+
+            tab.textContent = label;
+
+            if (sessionId === this.activeSessionId) {
+                tab.classList.add('active');
+            }
+
+            tab.addEventListener('click', () => {
+                this.setActiveSession(sessionId);
+            });
+
+            this.sessionTabsContainer.appendChild(tab);
+        });
+    }
+
+    showSessionPicker(sessions) {
+        if (!this.sessionPickerModal) return;
+
+        this.sessionPickerModal.style.display = 'flex';
+        const pickerList = this.sessionPickerModal.querySelector('.session-picker-list');
+
+        if (pickerList) {
+            pickerList.replaceChildren();
+
+            sessions.forEach(session => {
+                const item = document.createElement('button');
+                item.className = 'session-picker-item';
+
+                const label = session.name || session.triggerWord
+                    ? (session.name || `Trigger: ${session.triggerWord}`)
+                    : `Session ${session.id.substring(0, 8)}`;
+
+                item.textContent = label;
+
+                item.addEventListener('click', () => {
+                    this.setActiveSession(session.id);
+                    this.sessionPickerModal.style.display = 'none';
+                });
+
+                pickerList.appendChild(item);
+            });
+        }
+    }
+
+    findTargetSession(text) {
+        for (const [sessionId, session] of this.sessions) {
+            if (session.triggerWord && this.containsTriggerWord(text, session.triggerWord)) {
+                return sessionId;
+            }
+        }
+        return null;
+    }
+
+    removeTriggerWord(text, triggerWord) {
+        const words = text.split(/\s+/);
+        const filtered = words.filter(w => w.toLowerCase() !== triggerWord.toLowerCase());
+        return filtered.join(' ');
+    }
+
+    containsTriggerWord(text, triggerWord = null) {
+        const trigger = triggerWord || this.triggerWord;
+        if (!trigger) return false;
+        const words = text.toLowerCase().split(/\s+/);
+        return words.includes(trigger.toLowerCase());
     }
 
     handleWaitStatus(isWaiting) {
@@ -156,11 +307,15 @@ class MessengerClient {
                 }
             } catch (error) {
                 console.error('Failed to call speak-system API:', error);
+            } finally {
+                // Notify server that speaking is done
+                this.notifySpeakDone();
             }
         } else {
             // Use browser voice
             if (!window.speechSynthesis) {
                 console.error('Speech synthesis not available');
+                this.notifySpeakDone();
                 return;
             }
 
@@ -189,14 +344,29 @@ class MessengerClient {
 
             utterance.onend = () => {
                 this.debugLog('Finished speaking');
+                this.notifySpeakDone();
             };
 
             utterance.onerror = (event) => {
                 console.error('Speech synthesis error:', event);
+                this.notifySpeakDone();
             };
 
             // Speak the text
             window.speechSynthesis.speak(utterance);
+        }
+    }
+
+    async notifySpeakDone() {
+        try {
+            await fetch(`${this.baseUrl}/api/speak-done`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            this.debugLog('Notified server that speaking is done');
+        } catch (error) {
+            console.error('Failed to notify speak-done:', error);
         }
     }
 
@@ -229,7 +399,7 @@ class MessengerClient {
         if (!this.languageSelect || !this.voices) return;
 
         const currentSelection = this.languageSelect.value || 'en-US';
-        this.languageSelect.innerHTML = '';
+        this.languageSelect.replaceChildren();
 
         const allOption = document.createElement('option');
         allOption.value = 'all';
@@ -259,8 +429,8 @@ class MessengerClient {
 
         this.populateLanguageFilter();
 
-        this.localVoicesGroup.innerHTML = '';
-        this.cloudVoicesGroup.innerHTML = '';
+        this.localVoicesGroup.replaceChildren();
+        this.cloudVoicesGroup.replaceChildren();
 
         const excludedVoices = [
             'Eddy', 'Flo', 'Grandma', 'Grandpa', 'Reed', 'Rocko', 'Sandy', 'Shelley',
@@ -425,9 +595,12 @@ class MessengerClient {
     }
 
     async loadData() {
+        if (!this.activeSessionId) return;
+
         try {
-            // Load full conversation
-            const conversationResponse = await fetch(`${this.baseUrl}/api/conversation?limit=50`);
+            const conversationResponse = await fetch(
+                `${this.baseUrl}/api/conversation?limit=50&sessionId=${this.activeSessionId}`
+            );
             if (conversationResponse.ok) {
                 const data = await conversationResponse.json();
                 this.updateConversation(data.messages);
@@ -531,11 +704,18 @@ class MessengerClient {
             if (message.status === 'pending') {
                 const deleteBtn = document.createElement('span');
                 deleteBtn.className = 'delete-message-btn';
-                deleteBtn.innerHTML = `
-                    <svg class="delete-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                        <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
-                    </svg>
-                `;
+
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('class', 'delete-icon');
+                svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+                svg.setAttribute('viewBox', '0 0 24 24');
+
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', 'M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z');
+
+                svg.appendChild(path);
+                deleteBtn.appendChild(svg);
+
                 deleteBtn.onclick = (e) => {
                     e.stopPropagation();
                     this.deleteMessage(message.id);
@@ -593,12 +773,22 @@ class MessengerClient {
         await this.sendMessage(text);
     }
 
-    async sendMessage(text) {
+    async sendMessage(text, targetSessionId = null) {
         try {
+            const sessionId = targetSessionId || this.activeSessionId;
+            if (!sessionId) {
+                console.error('No session ID available');
+                return;
+            }
+
             const response = await fetch(`${this.baseUrl}/api/potential-utterances`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text, timestamp: new Date().toISOString() })
+                body: JSON.stringify({
+                    text,
+                    timestamp: new Date().toISOString(),
+                    sessionId
+                })
             });
 
             if (response.ok) {
@@ -701,29 +891,41 @@ class MessengerClient {
                     if (this.sendMode === 'automatic') {
                         // Send immediately
                         const finalText = this.messageInput.value.trim();
-                        this.sendMessage(finalText);
+
+                        // Check for multi-session routing if multiple sessions exist
+                        let targetSession = this.activeSessionId;
+                        if (this.sessions.size > 1) {
+                            targetSession = this.findTargetSession(finalText);
+                            if (targetSession) {
+                                const session = this.sessions.get(targetSession);
+                                const textToSend = this.removeTriggerWord(finalText, session.triggerWord);
+                                this.sendMessage(textToSend, targetSession);
+                                this.messageInput.value = '';
+                                this.accumulatedText = '';
+                                return;
+                            }
+                        }
+
+                        this.sendMessage(finalText, targetSession);
                         this.messageInput.value = '';
                         this.accumulatedText = '';
                     } else {
                         // Trigger word mode: accumulate until trigger word
-                        // Use the previously saved accumulated text (before interim was shown)
                         const previouslyAccumulated = this.accumulatedText || '';
                         const newUtterance = transcript.trim();
 
                         // Check if this new utterance contains the trigger word
                         if (this.containsTriggerWord(newUtterance)) {
-                            // Send everything accumulated plus this utterance (minus trigger word)
                             const combined = previouslyAccumulated
                                 ? previouslyAccumulated + ' ' + newUtterance
                                 : newUtterance;
-                            const textToSend = this.removeTriggerWord(combined).trim();
+                            const textToSend = this.removeTriggerWord(combined, this.triggerWord).trim();
                             if (textToSend) {
                                 this.sendMessage(textToSend);
                             }
                             this.messageInput.value = '';
                             this.accumulatedText = '';
                         } else {
-                            // No trigger word - append with space (no newlines)
                             const newAccumulated = previouslyAccumulated
                                 ? previouslyAccumulated + ' ' + newUtterance
                                 : newUtterance;
@@ -772,18 +974,6 @@ class MessengerClient {
         };
     }
 
-    containsTriggerWord(text) {
-        if (!this.triggerWord) return false;
-        const words = text.toLowerCase().split(/\s+/);
-        return words.includes(this.triggerWord.toLowerCase());
-    }
-
-    removeTriggerWord(text) {
-        if (!this.triggerWord) return text;
-        const words = text.split(/\s+/);
-        const filtered = words.filter(w => w.toLowerCase() !== this.triggerWord.toLowerCase());
-        return filtered.join(' ');
-    }
 
     async deleteMessage(messageId) {
         try {
