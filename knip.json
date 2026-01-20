@@ -7,10 +7,18 @@
   ],
   "ignore": [
     "src/__tests__/**",
+    "src/client/**",
     "public/**"
   ],
   "ignoreBinaries": [
     "knip",
     "ts-prune"
+  ],
+  "ignoreDependencies": [
+    "react",
+    "react-dom",
+    "@types/react",
+    "@types/react-dom",
+    "esbuild-plugin-postcss2"
   ]
 }

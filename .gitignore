@@ -1,6 +1,10 @@
 # TypeScript compiled output
 dist/
 
+# Client build output
+public/bundle.js
+public/bundle.css
+
 # Node modules
 node_modules/
 

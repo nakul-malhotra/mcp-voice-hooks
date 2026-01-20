@@ -18,9 +18,9 @@ npx knip --no-config-hints || {
   exit 1
 }
 
-# Run ts-prune to double-check for unused exports
+# Run ts-prune to double-check for unused exports (ignore client directory - bundled separately)
 echo "Running ts-prune to check for unused TypeScript exports..."
-npx ts-prune --error || {
+npx ts-prune --error --ignore 'src/client' || {
   echo "Error: ts-prune found unused TypeScript exports. Please fix the issues above." >&2
   exit 1
 }

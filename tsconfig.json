@@ -4,8 +4,11 @@
     "module": "ESNext",
     "moduleResolution": "node",
     "lib": [
-      "ESNext"
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
     ],
+    "jsx": "react-jsx",
     "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,

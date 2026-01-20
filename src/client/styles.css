@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@source "./components/**/*.tsx";
+@source "./App.tsx";
+@source "./main.tsx";
+
+/* Enable class-based dark mode for Tailwind v4 */
+@variant dark (&:where(.dark, .dark *));

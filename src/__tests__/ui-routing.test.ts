@@ -19,7 +19,7 @@ describe('UI Routing', () => {
 
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain('text/html');
-      expect(html).toContain('app.js');
+      expect(html).toContain('bundle.js');
       expect(html).toContain('Voice Mode'); // Title
     });
   });
@@ -42,7 +42,7 @@ describe('UI Routing', () => {
 
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain('text/html');
-      expect(html).toContain('app.js');
+      expect(html).toContain('bundle.js');
     });
   });
 });
