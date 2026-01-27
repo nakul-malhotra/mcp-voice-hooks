@@ -62,7 +62,8 @@ export const useSpeechSynthesis = (
 
       if (voice === 'system') {
         try {
-          const response = await fetch('/api/speak', {
+          // Use system voice endpoint (macOS 'say' command) - NOT /api/speak which is for MCP
+          const response = await fetch('/api/speak-system', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),

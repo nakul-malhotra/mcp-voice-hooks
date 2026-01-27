@@ -371,6 +371,48 @@ describe('Multi-Session Integration Tests', () => {
     });
   });
 
+  describe('Clear Messages', () => {
+    it('should clear all messages in a session', async () => {
+      const session = await sessionManager.createSession();
+
+      session.queue.add('Message 1');
+      session.queue.add('Message 2');
+      session.queue.addAssistantMessage('Response 1');
+
+      expect(session.queue.utterances.length).toBe(2);
+      expect(session.queue.messages.length).toBe(3);
+
+      session.queue.clear();
+
+      expect(session.queue.utterances.length).toBe(0);
+      expect(session.queue.messages.length).toBe(0);
+    });
+
+    it('should not affect other sessions when clearing messages', async () => {
+      const session1 = await sessionManager.createSession();
+      const session2 = await sessionManager.createSession();
+
+      session1.queue.add('Session 1 message');
+      session2.queue.add('Session 2 message');
+
+      session1.queue.clear();
+
+      expect(session1.queue.utterances.length).toBe(0);
+      expect(session2.queue.utterances.length).toBe(1);
+      expect(session2.queue.utterances[0].text).toBe('Session 2 message');
+    });
+
+    it('should handle clearing already empty session', async () => {
+      const session = await sessionManager.createSession();
+
+      expect(session.queue.utterances.length).toBe(0);
+
+      session.queue.clear();
+
+      expect(session.queue.utterances.length).toBe(0);
+    });
+  });
+
   describe('Conversation History', () => {
     it('should maintain separate conversation history per session', async () => {
       const session1 = await sessionManager.createSession();

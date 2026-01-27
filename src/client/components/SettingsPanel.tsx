@@ -57,52 +57,51 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const localVoices = filteredVoices.filter((v) => v.isLocal);
   const cloudVoices = filteredVoices.filter((v) => !v.isLocal);
 
-  const isGoogleVoice = selectedVoice.toLowerCase().includes('google');
-
   return (
-    <div className="border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+    <div className="border-t border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center justify-between w-full p-2 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors duration-200"
+        className="flex items-center justify-between w-full px-6 py-4 hover:bg-stone-50 dark:hover:bg-stone-800/50 transition-colors duration-200"
       >
-        <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-          Voice Settings
-        </h3>
+        <div className="flex items-center gap-3">
+          <div className={`w-2 h-2 rounded-full transition-colors duration-200 ${isVoiceEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-600'}`} />
+          <span className="text-sm font-medium text-stone-700 dark:text-stone-300">
+            Voice Output
+          </span>
+          <span className="text-xs text-stone-400 dark:text-stone-500">
+            {isVoiceEnabled ? 'On' : 'Off'}
+          </span>
+        </div>
         <svg
-          className={`w-5 h-5 text-zinc-500 dark:text-zinc-400 transition-transform duration-200 ${
-            isOpen ? 'rotate-180' : ''
-          }`}
+          className={`w-4 h-4 text-stone-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+          viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          viewBox="0 0 24 24"
+          strokeWidth="2"
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
-          />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
       {isOpen && (
-        <div className="mt-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
-          <div className="flex items-center justify-between p-3 bg-zinc-50 dark:bg-zinc-900 rounded-lg">
-            <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-              Voice Responses
+        <div className="px-6 pb-6 space-y-5 animate-in fade-in slide-in-from-top-2 duration-200">
+          {/* Enable/Disable toggle */}
+          <div className="flex items-center justify-between py-3 px-4 bg-stone-50 dark:bg-stone-800 rounded-xl">
+            <span className="text-sm text-stone-600 dark:text-stone-300">
+              Speak responses aloud
             </span>
             <button
               onClick={() => onVoiceEnabledChange(!isVoiceEnabled)}
               className={`
-                relative w-12 h-6 rounded-full transition-colors duration-200
-                ${isVoiceEnabled ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-700'}
+                relative w-11 h-6 rounded-full transition-colors duration-200
+                ${isVoiceEnabled ? 'bg-terracotta-500' : 'bg-stone-300 dark:bg-stone-600'}
               `}
             >
               <span
                 className={`
                   absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm
-                  transition-transform duration-200
-                  ${isVoiceEnabled ? 'translate-x-6' : 'translate-x-0'}
+                  transition-transform duration-200 ease-out
+                  ${isVoiceEnabled ? 'translate-x-5' : 'translate-x-0'}
                 `}
               />
             </button>
@@ -110,14 +109,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
           {isVoiceEnabled && (
             <div className="space-y-4">
+              {/* Language selector */}
               <div>
-                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                <label className="block text-xs font-medium text-stone-500 dark:text-stone-400 uppercase tracking-wide mb-2">
                   Language
                 </label>
                 <select
                   value={selectedLanguage}
                   onChange={(e) => setSelectedLanguage(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:focus:ring-emerald-600"
+                  className="w-full px-3 py-2.5 text-sm bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-stone-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-terracotta-500/20 focus:border-terracotta-500 transition-all duration-200"
                 >
                   {languages.map((lang) => (
                     <option key={lang} value={lang}>
@@ -127,18 +127,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </select>
               </div>
 
+              {/* Voice selector */}
               <div>
-                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                <label className="block text-xs font-medium text-stone-500 dark:text-stone-400 uppercase tracking-wide mb-2">
                   Voice
                 </label>
                 <select
                   value={selectedVoice}
                   onChange={(e) => onVoiceChange(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:focus:ring-emerald-600"
+                  className="w-full px-3 py-2.5 text-sm bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl text-stone-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-terracotta-500/20 focus:border-terracotta-500 transition-all duration-200"
                 >
-                  <option value="system">Mac System Voice</option>
+                  <option value="system">System Default</option>
                   {cloudVoices.length > 0 && (
-                    <optgroup label="Cloud Voices">
+                    <optgroup label="Enhanced">
                       {cloudVoices.map((voice) => (
                         <option key={voice.voiceURI} value={voice.voiceURI}>
                           {voice.name}
@@ -147,7 +148,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     </optgroup>
                   )}
                   {localVoices.length > 0 && (
-                    <optgroup label="Local Voices">
+                    <optgroup label="Local">
                       {localVoices.map((voice) => (
                         <option key={voice.voiceURI} value={voice.voiceURI}>
                           {voice.name}
@@ -156,42 +157,37 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     </optgroup>
                   )}
                 </select>
-
-                {selectedVoice === 'system' && (
-                  <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-xs text-blue-700 dark:text-blue-300">
-                    <span className="font-medium">Tip:</span> Download high-quality voices in Mac System Settings
-                  </div>
-                )}
               </div>
 
-              {isGoogleVoice && (
-                <div className="p-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-700 dark:text-amber-300">
-                  <span className="font-medium">Note:</span> Google voices may not respond well to rate adjustments
-                </div>
-              )}
-
+              {/* Speed slider */}
               <div>
-                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                  Speaking Rate: {speechRate.toFixed(1)}x
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-stone-500 dark:text-stone-400 uppercase tracking-wide">
+                    Speed
+                  </label>
+                  <span className="text-xs text-stone-600 dark:text-stone-300 tabular-nums">
+                    {speechRate.toFixed(1)}x
+                  </span>
+                </div>
                 <input
                   type="range"
                   min="0.5"
-                  max="3"
+                  max="2"
                   step="0.1"
                   value={speechRate}
                   onChange={(e) => onSpeechRateChange(parseFloat(e.target.value))}
-                  className="w-full h-2 bg-zinc-200 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                  className="w-full h-1.5 bg-stone-200 dark:bg-stone-700 rounded-full appearance-none cursor-pointer accent-terracotta-500"
                 />
-                <div className="flex justify-between text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                  <span>0.5x</span>
-                  <span>3.0x</span>
+                <div className="flex justify-between text-[10px] text-stone-400 mt-1">
+                  <span>Slow</span>
+                  <span>Fast</span>
                 </div>
               </div>
 
+              {/* Test button */}
               <button
                 onClick={onTestVoice}
-                className="w-full px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium rounded-lg transition-colors duration-200"
+                className="w-full px-4 py-2.5 bg-stone-900 dark:bg-stone-100 hover:bg-stone-800 dark:hover:bg-stone-200 text-white dark:text-stone-900 text-sm font-medium rounded-xl transition-colors duration-200"
               >
                 Test Voice
               </button>

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/stop\" -H 'X-Session-Id: ${MCP_VOICE_SESSION_ID}' || echo '{}'"
+            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/stop\" -H \"X-Session-Id: ${MCP_VOICE_SESSION_ID}\" || echo '{}'"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/pre-speak\" -H 'X-Session-Id: ${MCP_VOICE_SESSION_ID}' || echo '{}'"
+            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/pre-speak\" -H \"X-Session-Id: ${MCP_VOICE_SESSION_ID}\" || echo '{}'"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/post-tool\" -H 'X-Session-Id: ${MCP_VOICE_SESSION_ID}' || echo '{}'"
+            "command": "curl -s -X POST \"http://localhost:${MCP_VOICE_HOOKS_PORT:-5111}/api/hooks/post-tool\" -H \"X-Session-Id: ${MCP_VOICE_SESSION_ID}\" || echo '{}'"
           }
         ]
       }

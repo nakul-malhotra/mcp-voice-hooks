@@ -679,12 +679,15 @@ app.get('/api/tts-events', (req: Request, res: Response) => {
 
 // Helper function to notify all connected TTS clients for a specific session
 function notifyTTSClients(sessionId: string, text: string) {
-  const message = JSON.stringify({ type: 'speak', text });
+  const message = JSON.stringify({ type: 'message', text });
   const sessionClients = ttsClients.get(sessionId);
   if (sessionClients) {
+    debugLog(`[SSE] Sending message to ${sessionClients.size} client(s) for session ${sessionId}: "${text.substring(0, 50)}..."`);
     sessionClients.forEach(client => {
       client.write(`data: ${message}\n\n`);
     });
+  } else {
+    debugLog(`[SSE] No clients connected for session ${sessionId}, message not sent`);
   }
 }
 
@@ -711,6 +714,16 @@ function notifyWaitStatus(sessionId: string, isWaiting: boolean) {
       client.write(`data: ${message}\n\n`);
     });
   }
+}
+
+// Helper function to notify ALL connected clients (across all sessions) about global events
+function notifyAllClients(data: Record<string, unknown>) {
+  const message = JSON.stringify(data);
+  ttsClients.forEach((sessionClients) => {
+    sessionClients.forEach(client => {
+      client.write(`data: ${message}\n\n`);
+    });
+  });
 }
 
 // Helper function to format voice utterances for display
@@ -896,28 +909,83 @@ app.post('/api/speak-system', async (req: Request, res: Response) => {
 
 // Session Management Endpoints
 
+// POST /api/sessions - Create a new session (browser UI shortcut)
+app.post('/api/sessions', async (req: Request, res: Response) => {
+  console.log('[API /api/sessions] POST request received (browser UI create)');
+  console.log('[API /api/sessions] Request body:', JSON.stringify(req.body));
+
+  try {
+    const session = await sessionManager.createSession({
+      triggerWord: req.body?.triggerWord,
+      triggerAliases: req.body?.triggerAliases
+    });
+
+    console.log(`[API /api/sessions] SUCCESS - Created session: ${session.sessionId} with trigger: ${session.triggerWord}`);
+    debugLog(`[Sessions] Created new session via POST /api/sessions: ${session.sessionId}`);
+
+    res.json({
+      id: session.sessionId,
+      name: session.triggerWord,
+      triggerWord: session.triggerWord,
+      messages: [],
+      isActive: false,
+      messageCount: 0,
+      lastActivity: session.lastActivityAt,
+      sendMode: 'automatic',
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[API /api/sessions] ERROR creating session: ${errorMessage}`);
+
+    if (errorMessage.includes('already in use')) {
+      res.status(400).json({ error: errorMessage });
+      return;
+    }
+
+    res.status(500).json({
+      error: 'Failed to create session',
+      details: errorMessage
+    });
+  }
+});
+
 // GET /api/sessions - List all sessions (for browser UI)
 app.get('/api/sessions', (_req: Request, res: Response) => {
+  console.log('[API /api/sessions] GET request received');
   try {
     const sessions = sessionManager.getActiveSessions();
+    console.log(`[API /api/sessions] Found ${sessions.length} sessions in SessionManager`);
+    sessions.forEach((s, i) => {
+      console.log(`[API /api/sessions] Session ${i}: id=${s.sessionId}, trigger=${s.triggerWord}, voiceInputActive=${s.voiceInputActive}`);
+    });
+
     const activeSession = sessions.find(s => s.voiceInputActive) || sessions[0];
+    console.log(`[API /api/sessions] Active session: ${activeSession?.sessionId || 'none'}`);
 
     const sessionData = sessions.map(session => ({
       id: session.sessionId,
       name: session.triggerWord,
       triggerWord: session.triggerWord,
-      messages: [], // Messages are stored separately per session
+      messages: session.queue.getRecentMessages(50).map(m => ({
+        id: m.id,
+        role: m.role,
+        text: m.text,
+        timestamp: m.timestamp,
+        status: m.status,
+      })),
       isActive: session.voiceInputActive,
-      messageCount: session.getPendingCount(),
+      messageCount: session.queue.messages.length,
       lastActivity: session.lastActivityAt,
       sendMode: 'automatic' as const,
     }));
 
+    console.log(`[API /api/sessions] Returning ${sessionData.length} sessions to client`);
     res.json({
       sessions: sessionData,
       activeSessionId: activeSession?.sessionId || null,
     });
   } catch (error) {
+    console.error(`[API /api/sessions] ERROR: ${error}`);
     debugLog(`[Sessions] Failed to list sessions: ${error}`);
     res.status(500).json({
       error: 'Failed to list sessions',
@@ -958,6 +1026,7 @@ app.get('/api/debug/status', (_req: Request, res: Response) => {
         'POST /api/sessions/register - Register new session',
         'DELETE /api/sessions/:id - Delete session',
         'GET /api/debug/status - This endpoint',
+        'GET /api/debug/pipeline/:sessionId - Trace message pipeline',
         'GET /api/utterances - Get utterances',
         'GET /api/conversation - Get conversation',
       ],
@@ -970,16 +1039,91 @@ app.get('/api/debug/status', (_req: Request, res: Response) => {
   }
 });
 
+// GET /api/debug/pipeline/:sessionId - Trace full message pipeline for a session
+app.get('/api/debug/pipeline/:sessionId', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+
+  try {
+    const session = sessionManager.getSession(sessionId);
+
+    if (!session) {
+      res.status(404).json({
+        error: 'Session not found',
+        sessionId,
+        hint: 'This session may have been created by browser auto-create (orphan) or has been cleaned up',
+      });
+      return;
+    }
+
+    const utterances = session.queue.utterances;
+    const messages = session.queue.messages;
+
+    res.json({
+      session: {
+        id: session.sessionId,
+        triggerWord: session.triggerWord,
+        createdAt: session.createdAt,
+        lastActivityAt: session.lastActivityAt,
+        voiceInputActive: session.voiceInputActive,
+        voiceResponsesEnabled: session.voiceResponsesEnabled,
+        isWaiting: session.isWaiting,
+      },
+      pipeline: {
+        pending: utterances.filter(u => u.status === 'pending').map(u => ({
+          id: u.id,
+          text: u.text,
+          timestamp: u.timestamp,
+          stage: '1. Waiting for Claude to dequeue',
+        })),
+        delivered: utterances.filter(u => u.status === 'delivered').map(u => ({
+          id: u.id,
+          text: u.text,
+          timestamp: u.timestamp,
+          stage: '2. Delivered to Claude, awaiting response',
+        })),
+        responded: utterances.filter(u => u.status === 'responded').map(u => ({
+          id: u.id,
+          text: u.text,
+          timestamp: u.timestamp,
+          stage: '3. Claude has responded',
+        })),
+      },
+      counts: {
+        pending: utterances.filter(u => u.status === 'pending').length,
+        delivered: utterances.filter(u => u.status === 'delivered').length,
+        responded: utterances.filter(u => u.status === 'responded').length,
+        totalMessages: messages.length,
+      },
+      conversationHistory: messages.slice(-10).map(m => ({
+        id: m.id,
+        role: m.role,
+        text: m.text.substring(0, 100) + (m.text.length > 100 ? '...' : ''),
+        timestamp: m.timestamp,
+        status: m.status,
+      })),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to trace pipeline',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // POST /api/sessions/register - Register a new session
 app.post('/api/sessions/register', async (req: Request, res: Response) => {
+  console.log('[API /api/sessions/register] POST request received');
+  console.log('[API /api/sessions/register] Request body:', JSON.stringify(req.body));
   const { triggerWord, triggerAliases } = req.body;
 
   try {
+    console.log(`[API /api/sessions/register] Creating session with triggerWord=${triggerWord}, aliases=${triggerAliases}`);
     const session = await sessionManager.createSession({
       triggerWord,
       triggerAliases
     });
 
+    console.log(`[API /api/sessions/register] SUCCESS - Created session: ${session.sessionId} with trigger: ${session.triggerWord}`);
     debugLog(`[Sessions] Registered new session: ${session.sessionId} with trigger word: ${session.triggerWord}`);
 
     // Auto-open browser with sessionId
@@ -1053,6 +1197,41 @@ app.get('/api/sessions/active', (_req: Request, res: Response) => {
   }
 });
 
+// POST /api/sessions/:sessionId/activate - Activate/switch to a session
+app.post('/api/sessions/:sessionId/activate', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  console.log(`[API /api/sessions/:id/activate] POST request for session: ${sessionId}`);
+
+  try {
+    const session = sessionManager.getSession(sessionId);
+
+    if (!session) {
+      console.log(`[API /api/sessions/:id/activate] Session not found: ${sessionId}`);
+      res.status(404).json({
+        error: 'Session not found',
+        sessionId
+      });
+      return;
+    }
+
+    // Update activity timestamp
+    sessionManager.updateActivity(sessionId);
+    console.log(`[API /api/sessions/:id/activate] Activated session: ${sessionId} (${session.triggerWord})`);
+
+    res.json({
+      success: true,
+      sessionId: session.sessionId,
+      triggerWord: session.triggerWord
+    });
+  } catch (error) {
+    console.error(`[API /api/sessions/:id/activate] ERROR: ${error}`);
+    res.status(500).json({
+      error: 'Failed to activate session',
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 // GET /api/sessions/:sessionId - Get single session metadata
 app.get('/api/sessions/:sessionId', (req: Request, res: Response) => {
   const { sessionId } = req.params;
@@ -1117,6 +1296,41 @@ app.delete('/api/sessions/:sessionId', (req: Request, res: Response) => {
     debugLog(`[Sessions] Failed to delete session ${sessionId}: ${error}`);
     res.status(500).json({
       error: 'Failed to delete session',
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+// DELETE /api/sessions/:sessionId/messages - Clear all messages in session
+app.delete('/api/sessions/:sessionId/messages', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+
+  try {
+    const session = sessionManager.getSession(sessionId);
+
+    if (!session) {
+      res.status(404).json({
+        error: 'Session not found',
+        sessionId
+      });
+      return;
+    }
+
+    const clearedCount = session.queue.utterances.length;
+    session.queue.clear();
+
+    debugLog(`[Sessions] Cleared ${clearedCount} messages from session: ${sessionId}`);
+
+    res.json({
+      success: true,
+      message: 'Messages cleared successfully',
+      sessionId,
+      clearedCount
+    });
+  } catch (error) {
+    debugLog(`[Sessions] Failed to clear messages for ${sessionId}: ${error}`);
+    res.status(500).json({
+      error: 'Failed to clear messages',
       details: error instanceof Error ? error.message : String(error)
     });
   }
@@ -1239,6 +1453,10 @@ function getVoiceResponseReminder(): string {
 if (IS_MCP_MANAGED) {
   // Use stderr in MCP mode to avoid interfering with protocol
   console.error('[MCP] Initializing MCP server...');
+  console.error('[MCP] IS_MCP_MANAGED=true, setting up MCP protocol handlers');
+
+  // Store the session ID for this MCP instance
+  let mcpSessionId: string | null = null;
 
   const mcpServer = new Server(
     {
@@ -1254,7 +1472,28 @@ if (IS_MCP_MANAGED) {
 
   // Tool handlers
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    // Only expose the speak tool - voice input is auto-delivered via hooks
+    console.error('[MCP] ListToolsRequestSchema called - Claude is requesting available tools');
+    console.error('[MCP] Current session count:', sessionManager.getActiveSessions().length);
+
+    // Auto-register a session for this Claude instance if not already registered
+    if (!mcpSessionId) {
+      try {
+        const session = await sessionManager.createSession();
+        mcpSessionId = session.sessionId;
+        console.error(`[MCP] Auto-registered session: ${mcpSessionId} with trigger word: ${session.triggerWord}`);
+
+        // Notify any connected browsers about the new session via SSE
+        notifyAllClients({
+          type: 'session_created',
+          sessionId: session.sessionId,
+          triggerWord: session.triggerWord,
+        });
+      } catch (error) {
+        console.error(`[MCP] Failed to auto-register session: ${error}`);
+      }
+    } else {
+      console.error(`[MCP] Session already registered: ${mcpSessionId}`);
+    }
     return {
       tools: [
         {
@@ -1270,7 +1509,57 @@ if (IS_MCP_MANAGED) {
             },
             required: ['text'],
           },
-        }
+        },
+        {
+          name: 'get_session_info',
+          description: 'Get information about your current voice session including trigger word, pending messages, and conversation history',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'get_pending_messages',
+          description: 'Check for any pending voice messages from the user that need to be processed',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'wait_for_utterance',
+          description: 'Wait for new voice input from the user. Blocks until a message arrives or timeout. Use this when you want to listen for voice commands.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              timeout_seconds: {
+                type: 'number',
+                description: 'Maximum time to wait in seconds (default: 60, max: 300)',
+              },
+            },
+          },
+        },
+        {
+          name: 'dequeue_utterances',
+          description: 'Get all pending voice messages and mark them as delivered. Non-blocking - returns immediately with any available messages.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'get_conversation_history',
+          description: 'Get the full conversation history for your voice session',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              limit: {
+                type: 'number',
+                description: 'Maximum number of messages to return (default: 50)',
+              },
+            },
+          },
+        },
       ]
     };
   });
@@ -1294,7 +1583,22 @@ if (IS_MCP_MANAGED) {
           };
         }
 
-        const response = await fetch(`http://localhost:${HTTP_PORT}/api/speak`, {
+        // Ensure we have a session for this MCP instance
+        if (!mcpSessionId) {
+          console.error('[MCP] Warning: speak called without a registered session, attempting auto-register');
+          try {
+            const session = await sessionManager.createSession();
+            mcpSessionId = session.sessionId;
+            console.error(`[MCP] Late-registered session: ${mcpSessionId}`);
+          } catch (error) {
+            return {
+              content: [{ type: 'text', text: 'Error: No session registered for this Claude instance' }],
+              isError: true,
+            };
+          }
+        }
+
+        const response = await fetch(`http://localhost:${HTTP_PORT}/api/speak?sessionId=${mcpSessionId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
@@ -1322,6 +1626,158 @@ if (IS_MCP_MANAGED) {
             isError: true,
           };
         }
+      }
+
+      // Helper to ensure session exists
+      const ensureSession = async () => {
+        if (!mcpSessionId) {
+          const session = await sessionManager.createSession();
+          mcpSessionId = session.sessionId;
+          console.error(`[MCP] Auto-registered session: ${mcpSessionId}`);
+        }
+        return sessionManager.getSession(mcpSessionId);
+      };
+
+      if (name === 'get_session_info') {
+        const session = await ensureSession();
+        if (!session) {
+          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
+        }
+
+        const pendingCount = session.queue.utterances.filter(u => u.status === 'pending').length;
+        const deliveredCount = session.queue.utterances.filter(u => u.status === 'delivered').length;
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              sessionId: session.sessionId,
+              triggerWord: session.triggerWord,
+              triggerAliases: session.triggerAliases,
+              voiceResponsesEnabled: session.voiceResponsesEnabled,
+              voiceInputActive: session.voiceInputActive,
+              pendingMessages: pendingCount,
+              deliveredMessages: deliveredCount,
+              totalMessages: session.queue.messages.length,
+              createdAt: session.createdAt,
+              lastActivityAt: session.lastActivityAt,
+            }, null, 2),
+          }],
+        };
+      }
+
+      if (name === 'get_pending_messages') {
+        const session = await ensureSession();
+        if (!session) {
+          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
+        }
+
+        const pending = session.queue.utterances
+          .filter(u => u.status === 'pending')
+          .map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp }));
+
+        return {
+          content: [{
+            type: 'text',
+            text: pending.length > 0
+              ? JSON.stringify({ count: pending.length, messages: pending }, null, 2)
+              : 'No pending messages',
+          }],
+        };
+      }
+
+      if (name === 'wait_for_utterance') {
+        const session = await ensureSession();
+        if (!session) {
+          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
+        }
+
+        const timeoutSeconds = Math.min(args?.timeout_seconds as number || 60, WAIT_TIMEOUT_SECONDS);
+        const startTime = Date.now();
+        const timeoutMs = timeoutSeconds * 1000;
+
+        // Poll for messages
+        while (Date.now() - startTime < timeoutMs) {
+          const pending = session.queue.utterances.filter(u => u.status === 'pending');
+
+          if (pending.length > 0) {
+            // Mark as delivered
+            pending.forEach(u => session.queue.markDelivered(u.id));
+
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  messages: pending.map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp })),
+                  waitTime: Date.now() - startTime,
+                }, null, 2),
+              }],
+            };
+          }
+
+          // Wait 500ms before checking again
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ success: false, message: 'Timeout waiting for utterance', waitTime: timeoutMs }),
+          }],
+        };
+      }
+
+      if (name === 'dequeue_utterances') {
+        const session = await ensureSession();
+        if (!session) {
+          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
+        }
+
+        const pending = session.queue.utterances.filter(u => u.status === 'pending');
+
+        if (pending.length === 0) {
+          return { content: [{ type: 'text', text: 'No pending messages to dequeue' }] };
+        }
+
+        // Mark as delivered
+        pending.forEach(u => session.queue.markDelivered(u.id));
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              count: pending.length,
+              messages: pending.map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp })),
+            }, null, 2),
+          }],
+        };
+      }
+
+      if (name === 'get_conversation_history') {
+        const session = await ensureSession();
+        if (!session) {
+          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
+        }
+
+        const limit = args?.limit as number || 50;
+        const messages = session.queue.getRecentMessages(limit);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              count: messages.length,
+              messages: messages.map(m => ({
+                id: m.id,
+                role: m.role,
+                text: m.text,
+                timestamp: m.timestamp,
+                status: m.status,
+              })),
+            }, null, 2),
+          }],
+        };
       }
 
       throw new Error(`Unknown tool: ${name}`);

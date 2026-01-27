@@ -31,6 +31,7 @@ interface UseSessionResult {
   clearMessages: () => void;
   updateSendMode: (mode: 'automatic' | 'trigger') => void;
   updateTriggerWord: (word: string) => void;
+  updateVoiceSettings: (settings: { voiceResponsesEnabled?: boolean; voiceInputActive?: boolean }) => void;
 }
 
 export const useSession = (baseUrl: string): UseSessionResult => {
@@ -46,12 +47,16 @@ export const useSession = (baseUrl: string): UseSessionResult => {
           const sessionMap = new Map<string, Session>();
 
           data.sessions.forEach((session: any, index: number) => {
+            const messages = (session.messages || []).map((msg: any) => ({
+              ...msg,
+              timestamp: new Date(msg.timestamp),
+            }));
             sessionMap.set(session.id, {
               id: session.id,
               name: session.name,
-              messages: session.messages || [],
+              messages,
               isActive: session.isActive,
-              messageCount: session.messages?.length || 0,
+              messageCount: messages.length,
               lastActivity: session.lastActivity ? new Date(session.lastActivity) : undefined,
               sendMode: session.sendMode || 'automatic',
               triggerWord: session.triggerWord || MILITARY_ALPHABET[index % MILITARY_ALPHABET.length],
@@ -61,14 +66,29 @@ export const useSession = (baseUrl: string): UseSessionResult => {
           setSessions(sessionMap);
           if (data.activeSessionId) {
             setActiveSessionId(data.activeSessionId);
+          } else if (sessionMap.size > 0) {
+            // Set first session as active if none specified
+            const firstSession = sessionMap.values().next().value;
+            if (firstSession) {
+              setActiveSessionId(firstSession.id);
+            }
           }
+          // NOTE: We do NOT auto-create sessions here anymore.
+          // Sessions are created by Claude instances via MCP registration.
+          // If no sessions exist, the UI will show an empty state until Claude connects.
         }
       } catch (error) {
-        console.error('Failed to fetch sessions:', error);
+        console.error('[useSession] Failed to fetch sessions:', error);
       }
     };
 
     fetchSessions();
+
+    // Poll for new sessions periodically (in case Claude connects)
+    // Using 5 second interval to reduce noise
+    const pollInterval = setInterval(fetchSessions, 5000);
+
+    return () => clearInterval(pollInterval);
   }, [baseUrl]);
 
   const createSession = useCallback(async () => {
@@ -82,10 +102,14 @@ export const useSession = (baseUrl: string): UseSessionResult => {
         const serverSession = await response.json();
         setSessions((prev) => {
           const sessionIndex = prev.size;
+          const messages = (serverSession.messages || []).map((msg: any) => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp),
+          }));
           const newSession: Session = {
             ...serverSession,
-            messages: serverSession.messages || [],
-            messageCount: serverSession.messages?.length || 0,
+            messages,
+            messageCount: messages.length,
             sendMode: serverSession.sendMode || 'automatic',
             triggerWord: serverSession.triggerWord || MILITARY_ALPHABET[sessionIndex % MILITARY_ALPHABET.length],
           };
@@ -94,7 +118,7 @@ export const useSession = (baseUrl: string): UseSessionResult => {
         setActiveSessionId(serverSession.id);
       }
     } catch (error) {
-      console.error('Failed to create session:', error);
+      console.error('[useSession] Failed to create session:', error);
     }
   }, [baseUrl]);
 
@@ -142,8 +166,13 @@ export const useSession = (baseUrl: string): UseSessionResult => {
     }
   }, [baseUrl, activeSessionId, sessions]);
 
-  const addMessage = useCallback((message: Omit<Message, 'id' | 'timestamp'>) => {
-    if (!activeSessionId) return;
+  const addMessage = useCallback(async (message: Omit<Message, 'id' | 'timestamp'>) => {
+    console.log('[addMessage] Called with:', message.text, 'activeSessionId:', activeSessionId);
+
+    if (!activeSessionId) {
+      console.log('[addMessage] ERROR: No activeSessionId, message not added!');
+      return;
+    }
 
     const newMessage: Message = {
       ...message,
@@ -151,17 +180,52 @@ export const useSession = (baseUrl: string): UseSessionResult => {
       timestamp: new Date(),
     };
 
+    console.log('[addMessage] Creating message:', newMessage.id);
+
+    // Update local state immediately for optimistic UI
     setSessions((prev) => {
       const updated = new Map(prev);
       const session = updated.get(activeSessionId);
+      console.log('[addMessage] Found session:', session?.id, 'current messages:', session?.messages.length);
       if (session) {
-        session.messages.push(newMessage);
-        session.messageCount = session.messages.length;
-        session.lastActivity = new Date();
+        // Create a NEW session object with NEW messages array to trigger React re-render
+        const updatedSession: Session = {
+          ...session,
+          messages: [...session.messages, newMessage],
+          messageCount: session.messages.length + 1,
+          lastActivity: new Date(),
+        };
+        updated.set(activeSessionId, updatedSession);
+        console.log('[addMessage] Message added, new count:', updatedSession.messages.length);
+      } else {
+        console.log('[addMessage] ERROR: Session not found in map!');
       }
       return updated;
     });
-  }, [activeSessionId]);
+
+    // Send user messages to the server so Claude can receive them
+    if (message.role === 'user') {
+      try {
+        console.log('[addMessage] Sending to server:', message.text);
+        const response = await fetch(`${baseUrl}/api/potential-utterances?sessionId=${activeSessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: message.text,
+            timestamp: new Date().toISOString(),
+          }),
+        });
+
+        if (!response.ok) {
+          console.error('[addMessage] Server rejected message:', await response.text());
+        } else {
+          console.log('[addMessage] Message sent to server successfully');
+        }
+      } catch (error) {
+        console.error('[addMessage] Failed to send message to server:', error);
+      }
+    }
+  }, [activeSessionId, baseUrl]);
 
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!activeSessionId) return;
@@ -223,11 +287,13 @@ export const useSession = (baseUrl: string): UseSessionResult => {
       }
       return updated;
     });
+    // Note: sendMode is a local-only setting (controls browser behavior)
   }, [activeSessionId]);
 
-  const updateTriggerWord = useCallback((word: string) => {
+  const updateTriggerWord = useCallback(async (word: string) => {
     if (!activeSessionId) return;
 
+    // Update local state immediately
     setSessions((prev) => {
       const updated = new Map(prev);
       const session = updated.get(activeSessionId);
@@ -236,7 +302,51 @@ export const useSession = (baseUrl: string): UseSessionResult => {
       }
       return updated;
     });
-  }, [activeSessionId]);
+
+    // Sync to server
+    try {
+      const response = await fetch(`${baseUrl}/api/sessions/${activeSessionId}/trigger`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ triggerWord: word }),
+      });
+
+      if (!response.ok) {
+        console.error('[useSession] Failed to update trigger word on server:', await response.text());
+      }
+    } catch (error) {
+      console.error('[useSession] Failed to sync trigger word:', error);
+    }
+  }, [activeSessionId, baseUrl]);
+
+  const updateVoiceSettings = useCallback(async (settings: {
+    voiceResponsesEnabled?: boolean;
+    voiceInputActive?: boolean;
+  }) => {
+    if (!activeSessionId) return;
+
+    try {
+      // Update voice responses setting
+      if (settings.voiceResponsesEnabled !== undefined) {
+        await fetch(`${baseUrl}/api/voice-preferences?sessionId=${activeSessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ voiceResponsesEnabled: settings.voiceResponsesEnabled }),
+        });
+      }
+
+      // Update voice input active setting
+      if (settings.voiceInputActive !== undefined) {
+        await fetch(`${baseUrl}/api/voice-input-state?sessionId=${activeSessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: settings.voiceInputActive }),
+        });
+      }
+    } catch (error) {
+      console.error('[useSession] Failed to sync voice settings:', error);
+    }
+  }, [activeSessionId, baseUrl]);
 
   const activeSession = activeSessionId ? sessions.get(activeSessionId) || null : null;
 
@@ -252,5 +362,6 @@ export const useSession = (baseUrl: string): UseSessionResult => {
     clearMessages,
     updateSendMode,
     updateTriggerWord,
+    updateVoiceSettings,
   };
 };
