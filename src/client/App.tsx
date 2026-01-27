@@ -1,75 +1,37 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import {
-  SessionTabs,
-  ConversationView,
-  VoiceInput,
-  SettingsPanel,
-  SessionPicker,
-} from './components';
-import {
-  useSession,
-  useSpeechRecognition,
-  useSpeechSynthesis,
-  useSSE,
-} from './hooks';
+import { SessionColumn, VoiceInput, SettingsPanel } from './components';
+import { useSession, useSpeechRecognition, useSpeechSynthesis, useSSE } from './hooks';
 
 export const App: React.FC = () => {
   const baseUrl = window.location.origin;
 
   const {
     sessions,
-    activeSession,
     activeSessionId,
-    createSession,
     switchSession,
-    addMessage,
-    deleteMessage,
-    clearMessages,
-    updateSendMode,
-    updateTriggerWord,
+    addMessageToSession,
+    clearMessagesForSession,
     updateVoiceSettings,
+    findSessionByTrigger,
+    refreshAllSessions,
   } = useSession(baseUrl);
 
-  const [isSessionPickerOpen, setIsSessionPickerOpen] = useState(false);
+  const [targetedSessionId, setTargetedSessionId] = useState<string | null>(null);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [selectedVoice, setSelectedVoice] = useState('system');
   const [speechRate, setSpeechRate] = useState(1.0);
-  const [isWaiting, setIsWaiting] = useState(false);
+  const [waitingSessions, setWaitingSessions] = useState<Set<string>>(new Set());
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
     if (saved !== null) return saved === 'true';
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
 
-  const [localSendMode, setLocalSendMode] = useState<'automatic' | 'trigger'>(() => {
-    const saved = localStorage.getItem('sendMode');
-    return (saved === 'trigger') ? 'trigger' : 'automatic';
-  });
-  const [localTriggerWord, setLocalTriggerWord] = useState(() => {
-    return localStorage.getItem('triggerWord') || 'send';
-  });
-
-  const currentSendMode = activeSession?.sendMode || localSendMode;
-  const currentTriggerWord = activeSession?.triggerWord || localTriggerWord;
-
-  const handleSendModeChange = useCallback((mode: 'automatic' | 'trigger') => {
-    setLocalSendMode(mode);
-    localStorage.setItem('sendMode', mode);
-    updateSendMode(mode);
-  }, [updateSendMode]);
-
-  const handleTriggerWordChange = useCallback((word: string) => {
-    setLocalTriggerWord(word);
-    localStorage.setItem('triggerWord', word);
-    updateTriggerWord(word);
-  }, [updateTriggerWord]);
-
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
     localStorage.setItem('darkMode', String(isDarkMode));
   }, [isDarkMode]);
 
-  // Sync voice responses setting to server
   useEffect(() => {
     if (activeSessionId) {
       updateVoiceSettings({ voiceResponsesEnabled: isVoiceEnabled });
@@ -94,36 +56,35 @@ export const App: React.FC = () => {
     (transcript: string, isFinal: boolean) => {
       if (!isFinal) return;
 
-      if (currentSendMode === 'automatic') {
-        addMessage({
+      const combinedText = pendingTranscript ? `${pendingTranscript} ${transcript}` : transcript;
+
+      // Try to find target session by trigger word
+      const match = findSessionByTrigger(combinedText);
+
+      if (match && match.textWithoutTrigger) {
+        // Route to specific session
+        addMessageToSession(match.session.id, {
           role: 'user',
-          text: transcript,
+          text: match.textWithoutTrigger,
           status: 'pending',
         });
-        // Clear any pending transcript when message is sent
+        setTargetedSessionId(match.session.id);
         setPendingTranscript('');
-      } else if (currentSendMode === 'trigger') {
-        const combinedText = pendingTranscript ? `${pendingTranscript} ${transcript}` : transcript;
-        const words = combinedText.toLowerCase().split(/\s+/);
-
-        if (words.includes(currentTriggerWord.toLowerCase())) {
-          const messageText = combinedText
-            .replace(new RegExp(`\\b${currentTriggerWord}\\b`, 'gi'), '')
-            .trim();
-          if (messageText) {
-            addMessage({
-              role: 'user',
-              text: messageText,
-              status: 'pending',
-            });
-          }
-          setPendingTranscript('');
-        } else {
-          setPendingTranscript(combinedText);
-        }
+      } else if (sessions.length === 1) {
+        // Only one session - send directly
+        addMessageToSession(sessions[0].id, {
+          role: 'user',
+          text: combinedText,
+          status: 'pending',
+        });
+        setTargetedSessionId(sessions[0].id);
+        setPendingTranscript('');
+      } else if (sessions.length > 1) {
+        // Multiple sessions, no trigger found - accumulate
+        setPendingTranscript(combinedText);
       }
     },
-    [currentSendMode, currentTriggerWord, addMessage, pendingTranscript]
+    [findSessionByTrigger, addMessageToSession, sessions, pendingTranscript]
   );
 
   const { isListening, interimTranscript, startListening, stopListening } = useSpeechRecognition({
@@ -132,49 +93,47 @@ export const App: React.FC = () => {
     onTranscript: handleTranscript,
   });
 
-  // Sync voice input active state to server when listening changes
   useEffect(() => {
     if (activeSessionId) {
       updateVoiceSettings({ voiceInputActive: isListening });
     }
   }, [isListening, activeSessionId, updateVoiceSettings]);
 
-  const { isConnected } = useSSE({
+  // SSE connection for the active session
+  const { isConnected, reconnect: sseReconnect } = useSSE({
     url: `${baseUrl}/api/tts-events?sessionId=${activeSessionId}`,
     enabled: !!activeSessionId,
-    onOpen: () => {
-      console.log('[SSE] Connection opened successfully, sessionId:', activeSessionId);
-    },
-    onError: (error) => {
-      console.error('[SSE] Connection error:', error, 'sessionId:', activeSessionId);
-    },
     onMessage: (data) => {
-      console.log('[SSE] Message received:', data.type, data);
+      if (!activeSessionId) return;
+
       if (data.type === 'message') {
-        addMessage({
+        addMessageToSession(activeSessionId, {
           role: 'assistant',
           text: data.text,
         });
+        setTargetedSessionId(activeSessionId);
 
         if (isVoiceEnabled) {
           speak(data.text);
         }
       } else if (data.type === 'waiting') {
-        setIsWaiting(true);
+        setWaitingSessions(prev => new Set(prev).add(activeSessionId));
       } else if (data.type === 'response') {
-        setIsWaiting(false);
+        setWaitingSessions(prev => {
+          const next = new Set(prev);
+          next.delete(activeSessionId);
+          return next;
+        });
       }
     },
   });
 
-  // Debug logging for connection state
-  useEffect(() => {
-    console.log('[App] Connection state changed:', {
-      activeSessionId,
-      isConnected,
-      sseEnabled: !!activeSessionId,
-    });
-  }, [activeSessionId, isConnected]);
+  // Manual reconnect handler - refreshes all session data from server
+  const handleReconnect = useCallback(() => {
+    console.log('[App] Manual reconnect triggered');
+    sseReconnect();
+    refreshAllSessions();
+  }, [sseReconnect, refreshAllSessions]);
 
   const handleToggleListening = () => {
     if (isListening) {
@@ -185,12 +144,40 @@ export const App: React.FC = () => {
   };
 
   const handleSendMessage = (text: string) => {
-    addMessage({
-      role: 'user',
-      text,
-      status: 'pending',
-    });
-    // Clear pending transcript when message is sent
+    // Try to route by trigger word first
+    const match = findSessionByTrigger(text);
+
+    if (match && match.textWithoutTrigger) {
+      addMessageToSession(match.session.id, {
+        role: 'user',
+        text: match.textWithoutTrigger,
+        status: 'pending',
+      });
+      setTargetedSessionId(match.session.id);
+    } else if (sessions.length === 1) {
+      addMessageToSession(sessions[0].id, {
+        role: 'user',
+        text,
+        status: 'pending',
+      });
+      setTargetedSessionId(sessions[0].id);
+    } else if (targetedSessionId) {
+      // Send to last targeted session
+      addMessageToSession(targetedSessionId, {
+        role: 'user',
+        text,
+        status: 'pending',
+      });
+    } else if (sessions.length > 0) {
+      // Fallback to first session
+      addMessageToSession(sessions[0].id, {
+        role: 'user',
+        text,
+        status: 'pending',
+      });
+      setTargetedSessionId(sessions[0].id);
+    }
+
     setPendingTranscript('');
   };
 
@@ -198,36 +185,59 @@ export const App: React.FC = () => {
     speak('This is a test of the voice synthesis system.');
   };
 
+  const handleDeleteMessage = (sessionId: string, messageId: string) => {
+    // For now, just clear the message locally
+    // In a full implementation, this would call the server
+  };
+
+  // Set initial targeted session
+  useEffect(() => {
+    if (!targetedSessionId && sessions.length > 0) {
+      setTargetedSessionId(sessions[0].id);
+    }
+  }, [sessions, targetedSessionId]);
+
+  const triggerHints = sessions.map(s => s.triggerWord).join(', ');
+
   return (
-    <div className="flex flex-col h-screen bg-stone-50 dark:bg-stone-950 font-['Satoshi',system-ui,sans-serif]">
-      {/* Minimal header */}
-      <header className="flex items-center justify-between px-6 py-5 border-b border-stone-200 dark:border-stone-800">
+    <div className="flex flex-col h-screen bg-stone-100 dark:bg-stone-950 font-['Satoshi',system-ui,sans-serif]">
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-4 bg-white dark:bg-stone-900 border-b border-stone-200 dark:border-stone-800">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-semibold text-stone-900 dark:text-stone-100 tracking-tight">
             Claude Voice
           </h1>
-          {/* Connection status indicator */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ml-2">
-            {!activeSessionId ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                <span className="text-amber-600 dark:text-amber-400">Waiting for Claude...</span>
-              </>
-            ) : isConnected ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-emerald-600 dark:text-emerald-400">Connected</span>
-              </>
-            ) : (
-              <>
-                <span className="w-2 h-2 rounded-full bg-stone-400 animate-pulse" />
-                <span className="text-stone-500 dark:text-stone-400">Connecting...</span>
-              </>
-            )}
-          </div>
+          {sessions.length > 0 && (
+            <span className="text-xs text-stone-500 dark:text-stone-400">
+              {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Connection status and reconnect button */}
+          {sessions.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+              {!isConnected && (
+                <button
+                  onClick={handleReconnect}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+                >
+                  Reconnect
+                </button>
+              )}
+            </div>
+          )}
+          <button
+            onClick={handleReconnect}
+            className="p-2.5 rounded-xl text-stone-500 hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200"
+            title="Refresh conversations"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+            </svg>
+          </button>
           <button
             onClick={() => setIsDarkMode(!isDarkMode)}
             className="p-2.5 rounded-xl text-stone-500 hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200"
@@ -246,41 +256,56 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Debug: log sessions and activeSession */}
-        {console.log('[App Render] sessions:', sessions.length, 'activeSession:', activeSession?.id, 'messages:', activeSession?.messages?.length)}
-        <SessionTabs
-          sessions={sessions.map((s) => ({
-            id: s.id,
-            name: s.name,
-            messageCount: s.messageCount,
-            isActive: s.isActive,
-            triggerWord: s.triggerWord,
-          }))}
-          activeSessionId={activeSessionId}
-          onSessionChange={switchSession}
-          onNewSession={createSession}
-        />
+      {/* Main content - Multi-column layout */}
+      <div className="flex-1 flex overflow-hidden p-4 gap-4">
+        {sessions.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center max-w-md">
+              <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-stone-200 dark:bg-stone-800 flex items-center justify-center">
+                <svg className="w-8 h-8 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-semibold text-stone-800 dark:text-stone-100 mb-2">
+                Waiting for Claude
+              </h2>
+              <p className="text-sm text-stone-500 dark:text-stone-400 leading-relaxed">
+                Start a Claude Code session with voice hooks enabled to connect here.
+              </p>
+            </div>
+          </div>
+        ) : (
+          sessions.map((session) => (
+            <SessionColumn
+              key={session.id}
+              session={session}
+              isTargeted={session.id === targetedSessionId}
+              isWaiting={waitingSessions.has(session.id)}
+              onDeleteMessage={(msgId) => handleDeleteMessage(session.id, msgId)}
+              onClearMessages={() => clearMessagesForSession(session.id)}
+            />
+          ))
+        )}
+      </div>
 
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <ConversationView
-            messages={activeSession?.messages || []}
-            isWaiting={isWaiting}
-            onDeleteMessage={deleteMessage}
-            onClearConversation={clearMessages}
-          />
-
+      {/* Voice input - shared across all sessions */}
+      {sessions.length > 0 && (
+        <div className="bg-white dark:bg-stone-900 border-t border-stone-200 dark:border-stone-800">
+          {sessions.length > 1 && (
+            <div className="px-6 pt-3 text-xs text-stone-500 dark:text-stone-400">
+              Say a trigger word to route: <span className="font-medium text-stone-700 dark:text-stone-300">{triggerHints}</span>
+            </div>
+          )}
           <VoiceInput
             onSendMessage={handleSendMessage}
             isListening={isListening}
             interimTranscript={interimTranscript}
             pendingTranscript={pendingTranscript}
             onToggleListening={handleToggleListening}
-            sendMode={currentSendMode}
-            triggerWord={currentTriggerWord}
-            onSendModeChange={handleSendModeChange}
-            onTriggerWordChange={handleTriggerWordChange}
+            sendMode="automatic"
+            triggerWord=""
+            onSendModeChange={() => {}}
+            onTriggerWordChange={() => {}}
           />
 
           <SettingsPanel
@@ -293,21 +318,7 @@ export const App: React.FC = () => {
             onTestVoice={handleTestVoice}
           />
         </div>
-      </div>
-
-      <SessionPicker
-        isOpen={isSessionPickerOpen}
-        sessions={sessions.map((s) => ({
-          id: s.id,
-          name: s.name,
-          messageCount: s.messageCount,
-          lastActivity: s.lastActivity,
-          isActive: s.isActive,
-        }))}
-        onClose={() => setIsSessionPickerOpen(false)}
-        onSelectSession={switchSession}
-        onCreateSession={createSession}
-      />
+      )}
     </div>
   );
 };

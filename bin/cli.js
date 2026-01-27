@@ -130,6 +130,36 @@ async function configureClaudeCodeSettings() {
   console.log('✅ Updated project Claude Code settings');
 }
 
+// Install skills (e.g. /listen, /stop-listening) into the project's .claude/skills/
+async function installSkills() {
+  const skillsSourceDir = path.join(__dirname, '..', 'plugin', 'skills');
+  const skillsTargetDir = path.join(process.cwd(), '.claude', 'skills');
+
+  if (!fs.existsSync(skillsSourceDir)) return;
+
+  const skillDirs = fs.readdirSync(skillsSourceDir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+
+  if (skillDirs.length === 0) return;
+
+  for (const skillName of skillDirs) {
+    const sourceSkillFile = path.join(skillsSourceDir, skillName, 'SKILL.md');
+    if (!fs.existsSync(sourceSkillFile)) continue;
+
+    const targetDir = path.join(skillsTargetDir, skillName);
+    const targetSkillFile = path.join(targetDir, 'SKILL.md');
+    const sourceContent = fs.readFileSync(sourceSkillFile, 'utf8');
+
+    // Only write if content differs or file doesn't exist
+    if (!fs.existsSync(targetSkillFile) || fs.readFileSync(targetSkillFile, 'utf8') !== sourceContent) {
+      fs.mkdirSync(targetDir, { recursive: true });
+      fs.writeFileSync(targetSkillFile, sourceContent);
+      console.log(`✅ Installed skill: /${skillName}`);
+    }
+  }
+}
+
 // Silent hook installation check - runs on every startup
 async function ensureHooksInstalled() {
   try {
@@ -137,6 +167,10 @@ async function ensureHooksInstalled() {
 
     // Update hooks configuration in settings.json
     await configureClaudeCodeSettings();
+
+    // Install skills (slash commands)
+    await installSkills();
+
     console.log('✅ Hooks and settings updated');
   } catch (error) {
     // Silently continue if hooks can't be updated

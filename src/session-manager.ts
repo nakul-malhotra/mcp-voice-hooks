@@ -121,6 +121,7 @@ export interface SessionState {
   sessionId: string;
   triggerWord: string;
   triggerAliases: string[];
+  ownerPids: number[];
   queue: UtteranceQueue;
   voicePreferences: VoicePreferences;
   isSpeaking: boolean;
@@ -141,6 +142,7 @@ export interface SessionState {
 interface SessionConfig {
   triggerWord?: string;
   triggerAliases?: string[];
+  ownerPids?: number[];
 }
 
 /**
@@ -180,6 +182,7 @@ export class SessionManager {
       sessionId,
       triggerWord,
       triggerAliases,
+      ownerPids: config?.ownerPids || [],
       queue: new UtteranceQueue(),
       voicePreferences: {
         voiceResponsesEnabled: false,
@@ -321,6 +324,18 @@ export class SessionManager {
     }
 
     return triggers;
+  }
+
+  /**
+   * Finds a session by an owner PID
+   */
+  getSessionByOwnerPid(pid: number): SessionState | null {
+    for (const session of this.sessions.values()) {
+      if (session.ownerPids.includes(pid)) {
+        return session;
+      }
+    }
+    return null;
   }
 
   /**

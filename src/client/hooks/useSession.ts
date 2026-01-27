@@ -27,11 +27,16 @@ interface UseSessionResult {
   switchSession: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
   addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => void;
+  addMessageToSession: (sessionId: string, message: Omit<Message, 'id' | 'timestamp'>) => void;
   deleteMessage: (messageId: string) => void;
   clearMessages: () => void;
+  clearMessagesForSession: (sessionId: string) => void;
   updateSendMode: (mode: 'automatic' | 'trigger') => void;
   updateTriggerWord: (word: string) => void;
   updateVoiceSettings: (settings: { voiceResponsesEnabled?: boolean; voiceInputActive?: boolean }) => void;
+  findSessionByTrigger: (text: string) => { session: Session; textWithoutTrigger: string } | null;
+  refreshMessages: (sessionId?: string) => Promise<void>;
+  refreshAllSessions: () => Promise<void>;
 }
 
 export const useSession = (baseUrl: string): UseSessionResult => {
@@ -348,6 +353,178 @@ export const useSession = (baseUrl: string): UseSessionResult => {
     }
   }, [activeSessionId, baseUrl]);
 
+  const addMessageToSession = useCallback(async (sessionId: string, message: Omit<Message, 'id' | 'timestamp'>) => {
+    const newMessage: Message = {
+      ...message,
+      id: `msg-${Date.now()}-${Math.random()}`,
+      timestamp: new Date(),
+    };
+
+    setSessions((prev) => {
+      const updated = new Map(prev);
+      const session = updated.get(sessionId);
+      if (session) {
+        const updatedSession: Session = {
+          ...session,
+          messages: [...session.messages, newMessage],
+          messageCount: session.messages.length + 1,
+          lastActivity: new Date(),
+        };
+        updated.set(sessionId, updatedSession);
+      }
+      return updated;
+    });
+
+    if (message.role === 'user') {
+      try {
+        await fetch(`${baseUrl}/api/potential-utterances?sessionId=${sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: message.text,
+            timestamp: new Date().toISOString(),
+          }),
+        });
+      } catch (error) {
+        console.error('[addMessageToSession] Failed to send message:', error);
+      }
+    }
+  }, [baseUrl]);
+
+  const clearMessagesForSession = useCallback(async (sessionId: string) => {
+    try {
+      const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        setSessions((prev) => {
+          const updated = new Map(prev);
+          const session = updated.get(sessionId);
+          if (session) {
+            updated.set(sessionId, { ...session, messages: [], messageCount: 0 });
+          }
+          return updated;
+        });
+      }
+    } catch (error) {
+      console.error('Failed to clear messages:', error);
+    }
+  }, [baseUrl]);
+
+  const findSessionByTrigger = useCallback((text: string): { session: Session; textWithoutTrigger: string } | null => {
+    const words = text.toLowerCase().split(/\s+/);
+    const sessionList = Array.from(sessions.values());
+
+    for (const session of sessionList) {
+      const trigger = session.triggerWord.toLowerCase();
+      if (words.includes(trigger)) {
+        const prefixes = ['hey', 'hi', 'hello', 'ok', 'okay'];
+        let result = text;
+
+        for (const prefix of prefixes) {
+          const pattern = new RegExp(`^${prefix}\\s+${trigger}[,:]?\\s*`, 'i');
+          result = result.replace(pattern, '');
+        }
+
+        const standalonePattern = new RegExp(`\\b${trigger}[,:]?\\s*`, 'gi');
+        result = result.replace(standalonePattern, '').trim();
+
+        return { session, textWithoutTrigger: result };
+      }
+    }
+
+    return null;
+  }, [sessions]);
+
+  /** Refresh messages for a specific session from the server */
+  const refreshMessages = useCallback(async (sessionId?: string) => {
+    const targetSessionId = sessionId || activeSessionId;
+    if (!targetSessionId) return;
+
+    try {
+      console.log('[refreshMessages] Fetching messages for session:', targetSessionId);
+      const response = await fetch(`${baseUrl}/api/conversation?sessionId=${targetSessionId}&limit=100`);
+
+      if (response.ok) {
+        const data = await response.json();
+        const messages: Message[] = (data.messages || []).map((msg: any) => ({
+          id: msg.id,
+          role: msg.role,
+          text: msg.text,
+          timestamp: new Date(msg.timestamp),
+          status: msg.status,
+        }));
+
+        setSessions((prev) => {
+          const updated = new Map(prev);
+          const session = updated.get(targetSessionId);
+          if (session) {
+            updated.set(targetSessionId, {
+              ...session,
+              messages,
+              messageCount: messages.length,
+            });
+            console.log('[refreshMessages] Updated session with', messages.length, 'messages');
+          }
+          return updated;
+        });
+      }
+    } catch (error) {
+      console.error('[refreshMessages] Failed to refresh:', error);
+    }
+  }, [baseUrl, activeSessionId]);
+
+  /** Refresh all sessions and their messages from the server */
+  const refreshAllSessions = useCallback(async () => {
+    try {
+      console.log('[refreshAllSessions] Fetching all sessions...');
+      const response = await fetch(`${baseUrl}/api/sessions`);
+
+      if (response.ok) {
+        const data = await response.json();
+        const sessionMap = new Map<string, Session>();
+
+        // Fetch messages for each session
+        await Promise.all(data.sessions.map(async (session: any, index: number) => {
+          const convResponse = await fetch(`${baseUrl}/api/conversation?sessionId=${session.id}&limit=100`);
+          let messages: Message[] = [];
+
+          if (convResponse.ok) {
+            const convData = await convResponse.json();
+            messages = (convData.messages || []).map((msg: any) => ({
+              id: msg.id,
+              role: msg.role,
+              text: msg.text,
+              timestamp: new Date(msg.timestamp),
+              status: msg.status,
+            }));
+          }
+
+          sessionMap.set(session.id, {
+            id: session.id,
+            name: session.name,
+            messages,
+            isActive: session.isActive,
+            messageCount: messages.length,
+            lastActivity: session.lastActivity ? new Date(session.lastActivity) : undefined,
+            sendMode: session.sendMode || 'automatic',
+            triggerWord: session.triggerWord || MILITARY_ALPHABET[index % MILITARY_ALPHABET.length],
+          });
+        }));
+
+        setSessions(sessionMap);
+        console.log('[refreshAllSessions] Refreshed', sessionMap.size, 'sessions');
+
+        if (data.activeSessionId) {
+          setActiveSessionId(data.activeSessionId);
+        }
+      }
+    } catch (error) {
+      console.error('[refreshAllSessions] Failed to refresh:', error);
+    }
+  }, [baseUrl]);
+
   const activeSession = activeSessionId ? sessions.get(activeSessionId) || null : null;
 
   return {
@@ -358,10 +535,15 @@ export const useSession = (baseUrl: string): UseSessionResult => {
     switchSession,
     deleteSession,
     addMessage,
+    addMessageToSession,
     deleteMessage,
     clearMessages,
+    clearMessagesForSession,
     updateSendMode,
     updateTriggerWord,
     updateVoiceSettings,
+    findSessionByTrigger,
+    refreshMessages,
+    refreshAllSessions,
   };
 };

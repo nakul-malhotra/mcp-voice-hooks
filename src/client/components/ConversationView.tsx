@@ -18,8 +18,6 @@ export const ConversationView: React.FC<ConversationViewProps> = ({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  console.log('[ConversationView] Rendering with', messages.length, 'messages:', messages.map(m => m.text.substring(0, 30)));
-
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);

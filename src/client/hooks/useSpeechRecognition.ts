@@ -36,6 +36,19 @@ export const useSpeechRecognition = (
 
   const recognitionRef = useRef<any>(null);
 
+  // Use refs for callbacks to avoid recreating the recognition instance
+  const onTranscriptRef = useRef(onTranscript);
+  const onErrorRef = useRef(onError);
+
+  // Keep refs updated with latest callbacks
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+  }, [onTranscript]);
+
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -64,18 +77,17 @@ export const useSpeechRecognition = (
 
         if (finalText) {
           setTranscript((prev) => prev + finalText);
-          onTranscript?.(finalText.trim(), true);
-        }
-
-        if (interimText) {
+          setInterimTranscript(''); // Clear interim when we get final result
+          onTranscriptRef.current?.(finalText.trim(), true);
+        } else if (interimText) {
           setInterimTranscript(interimText);
-          onTranscript?.(interimText, false);
+          onTranscriptRef.current?.(interimText, false);
         }
       };
 
       recognitionRef.current.onerror = (event: any) => {
         console.error('Speech recognition error:', event.error);
-        onError?.(event.error);
+        onErrorRef.current?.(event.error);
         setIsListening(false);
       };
 
@@ -90,7 +102,7 @@ export const useSpeechRecognition = (
         recognitionRef.current.stop();
       }
     };
-  }, [continuous, interimResults, lang, onTranscript, onError]);
+  }, [continuous, interimResults, lang]);
 
   const startListening = useCallback(() => {
     if (!recognitionRef.current || isListening) return;

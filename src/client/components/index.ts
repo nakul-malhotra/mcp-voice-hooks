@@ -1,4 +1,5 @@
 export { SessionTabs } from './SessionTabs';
+export { SessionColumn } from './SessionColumn';
 export { MessageBubble } from './MessageBubble';
 export { ConversationView } from './ConversationView';
 export { WaitingIndicator } from './WaitingIndicator';

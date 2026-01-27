@@ -15,6 +15,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { writeFileSync, unlinkSync } from 'fs';
 import { SessionManager, SessionState } from './session-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,22 +43,252 @@ async function playNotificationSound() {
 // Determine if we're running in MCP-managed mode
 const IS_MCP_MANAGED = process.argv.includes('--mcp-managed');
 
-// Session manager singleton
+// Collect this process's PID, parent PID, and grandparent PID.
+// Hooks run as direct children of Claude Code, so their $PPID is Claude Code's PID.
+// The MCP server may be a child (npx exec'd) or grandchild (npx spawned node) of Claude Code.
+// Registering all ancestor PIDs ensures at least one matches the hook's $PPID.
+async function getAncestorPids(): Promise<number[]> {
+  const pids = [process.pid, process.ppid];
+  try {
+    const { stdout } = await execAsync(`ps -o ppid= -p ${process.ppid}`);
+    const grandparentPid = parseInt(stdout.trim());
+    if (grandparentPid > 1 && !pids.includes(grandparentPid)) {
+      pids.push(grandparentPid);
+    }
+  } catch {
+    // Ignore - grandparent lookup is best-effort
+  }
+  return pids;
+}
+
+// Write session ID to PID-keyed files so hooks can read it via $(cat /tmp/mcp-voice-session-$PPID).
+// Returns the file paths written (for cleanup on exit).
+function writeSessionFiles(sessionId: string, pids: number[]): string[] {
+  const paths: string[] = [];
+  for (const pid of pids) {
+    const filePath = `/tmp/mcp-voice-session-${pid}`;
+    try {
+      writeFileSync(filePath, sessionId);
+      paths.push(filePath);
+    } catch {
+      // Best-effort
+    }
+  }
+  return paths;
+}
+
+function cleanupSessionFiles(paths: string[]) {
+  for (const p of paths) {
+    try { unlinkSync(p); } catch { /* already gone */ }
+  }
+}
+
+// Session manager singleton (source of truth for primary instance)
 const sessionManager = new SessionManager();
+
+/**
+ * Centralized session client for MCP instances.
+ * Routes to local session manager if primary, or HTTP if secondary.
+ * This ensures all session state goes through the shared HTTP server.
+ */
+class McpSessionClient {
+  private sessionId: string | null = null;
+  private triggerWord: string | null = null;
+  private sessionFilePaths: string[] = [];
+
+  /** Register a new session and get assigned a unique trigger word */
+  async register(): Promise<{ sessionId: string; triggerWord: string }> {
+    if (this.sessionId) {
+      return { sessionId: this.sessionId, triggerWord: this.triggerWord! };
+    }
+
+    // Always register via HTTP to ensure shared state handles uniqueness
+    const ownerPids = await getAncestorPids();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/sessions/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ownerPids }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to register session');
+    }
+
+    const data = await response.json();
+    this.sessionId = data.sessionId;
+    this.triggerWord = data.triggerWord;
+
+    // Write session ID to PID-keyed files so hooks can resolve it
+    this.sessionFilePaths = writeSessionFiles(data.sessionId, ownerPids);
+    console.error(`[McpSessionClient] Registered session: ${this.sessionId} with trigger: ${this.triggerWord}`);
+    return { sessionId: data.sessionId as string, triggerWord: data.triggerWord as string };
+  }
+
+  /** Force re-registration, clearing any stale session state */
+  async reconnect(): Promise<{ sessionId: string; triggerWord: string }> {
+    cleanupSessionFiles(this.sessionFilePaths);
+    this.sessionFilePaths = [];
+    this.sessionId = null;
+    this.triggerWord = null;
+    return this.register();
+  }
+
+  /** Get session ID, registering if needed */
+  async getSessionId(): Promise<string> {
+    if (!this.sessionId) {
+      await this.register();
+    }
+    return this.sessionId!;
+  }
+
+  /** Get session info */
+  async getSessionInfo(): Promise<any> {
+    const sessionId = await this.getSessionId();
+    const [sessionRes, statusRes] = await Promise.all([
+      fetch(`http://localhost:${HTTP_PORT}/api/sessions/${sessionId}`),
+      fetch(`http://localhost:${HTTP_PORT}/api/utterances/status?sessionId=${sessionId}`),
+    ]);
+
+    if (!sessionRes.ok) {
+      throw new Error('Session not found');
+    }
+
+    const sessionData = await sessionRes.json();
+    const statusData = statusRes.ok ? await statusRes.json() : { pending: 0, delivered: 0, total: 0 };
+
+    return {
+      sessionId: sessionData.session.sessionId,
+      triggerWord: sessionData.session.triggerWord,
+      triggerAliases: sessionData.session.triggerAliases || [],
+      voiceResponsesEnabled: sessionData.session.voiceResponsesEnabled,
+      voiceInputActive: sessionData.session.voiceInputActive,
+      pendingMessages: statusData.pending,
+      deliveredMessages: statusData.delivered,
+      totalMessages: statusData.total,
+      createdAt: sessionData.session.createdAt,
+      lastActivityAt: sessionData.session.lastActivityAt,
+    };
+  }
+
+  /** Get pending messages (without marking as delivered) */
+  async getPendingMessages(): Promise<{ count: number; messages: any[] }> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/utterances?sessionId=${sessionId}&limit=100`);
+
+    if (!response.ok) {
+      throw new Error('Failed to get messages');
+    }
+
+    const data = await response.json();
+    const pending = (data.utterances || [])
+      .filter((u: any) => u.status === 'pending')
+      .map((u: any) => ({ id: u.id, text: u.text, timestamp: u.timestamp }));
+
+    return { count: pending.length, messages: pending };
+  }
+
+  /** Dequeue pending messages (marks them as delivered) */
+  async dequeueMessages(): Promise<{ utterances: any[] }> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/dequeue-utterances?sessionId=${sessionId}`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to dequeue messages');
+    }
+
+    return await response.json();
+  }
+
+  /** Wait for new utterances (blocking with timeout) */
+  async waitForUtterance(timeoutSeconds: number = 60): Promise<any> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/wait-for-utterances?sessionId=${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timeout: timeoutSeconds }),
+    });
+
+    return await response.json();
+  }
+
+  /** Speak text via TTS */
+  async speak(text: string): Promise<any> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/speak?sessionId=${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to speak');
+    }
+
+    return await response.json();
+  }
+
+  /** Get conversation history */
+  async getConversationHistory(limit: number = 50): Promise<any[]> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/conversation?sessionId=${sessionId}&limit=${limit}`);
+
+    if (!response.ok) {
+      throw new Error('Failed to get conversation history');
+    }
+
+    const data = await response.json();
+    return data.messages || [];
+  }
+
+  /** Set voice input active/inactive */
+  async setVoiceInput(active: boolean): Promise<{ voiceInputActive: boolean }> {
+    const sessionId = await this.getSessionId();
+    const response = await fetch(`http://localhost:${HTTP_PORT}/api/voice-input-state?sessionId=${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to set voice input state');
+    }
+
+    return await response.json();
+  }
+}
 
 // Helper function to get session from request
 function getSessionFromRequest(req: Request): SessionState | null {
   const sessionId = req.query.sessionId as string || req.headers['x-session-id'] as string;
 
-  if (!sessionId) {
-    const sessions = sessionManager.getAllSessions();
-    if (sessions.length === 1) return sessions[0];
-    return null;
+  if (sessionId) {
+    const session = sessionManager.getSession(sessionId);
+    if (session) sessionManager.updateActivity(sessionId);
+    return session;
   }
 
-  const session = sessionManager.getSession(sessionId);
-  if (session) sessionManager.updateActivity(sessionId);
-  return session;
+  // PID-based lookup: hooks pass their $PPID (Claude Code's PID),
+  // which matches one of the ownerPids registered during MCP session creation.
+  const callerPpid = req.headers['x-caller-ppid'] as string;
+  if (callerPpid) {
+    const pid = parseInt(callerPpid);
+    if (!isNaN(pid)) {
+      const session = sessionManager.getSessionByOwnerPid(pid);
+      if (session) {
+        sessionManager.updateActivity(session.sessionId);
+        return session;
+      }
+    }
+  }
+
+  // Fallback: if only one session exists, return it
+  const sessions = sessionManager.getAllSessions();
+  if (sessions.length === 1) return sessions[0];
+  return null;
 }
 
 // HTTP Server Setup (always created)
@@ -473,34 +704,41 @@ function handleHookRequest(session: SessionState, attemptedAction: 'tool' | 'spe
       };
     }
 
-    // Auto-wait for utterances (only if voice input is active)
+    // Auto-wait for utterances (only if voice input is active).
+    // Loops until an utterance arrives or voice input is deactivated,
+    // so Claude never goes idle while the mic is on.
     if (voiceInputActive) {
       return (async () => {
         try {
-          debugLog(`[Stop Hook] Auto-calling wait_for_utterance for session ${session.sessionId}...`);
-          const data = await waitForUtteranceCore(session);
-          debugLog(`[Stop Hook] wait_for_utterance response: ${JSON.stringify(data)}`);
+          while (session.voiceInputActive) {
+            debugLog(`[Stop Hook] Auto-calling wait_for_utterance for session ${session.sessionId}...`);
+            const data = await waitForUtteranceCore(session);
+            debugLog(`[Stop Hook] wait_for_utterance response: ${JSON.stringify(data)}`);
 
-          // If error (voice input not active), treat as no utterances found
-          if (!data.success && data.error) {
-            return {
-              decision: 'approve' as const,
-              reason: data.error
-            };
+            // If error (voice input not active), let Claude stop
+            if (!data.success && data.error) {
+              return {
+                decision: 'approve' as const,
+                reason: data.error
+              };
+            }
+
+            // If utterances were found, block and return them
+            if (data.utterances && data.utterances.length > 0) {
+              return {
+                decision: 'block' as const,
+                reason: formatVoiceUtterances(data.utterances)
+              };
+            }
+
+            // Timeout reached but voice still active -- keep waiting
+            debugLog(`[Stop Hook] Wait timed out, voice still active for session ${session.sessionId}, re-entering wait...`);
           }
 
-          // If utterances were found, block and return them
-          if (data.utterances && data.utterances.length > 0) {
-            return {
-              decision: 'block' as const,
-              reason: formatVoiceUtterances(data.utterances)
-            };
-          }
-
-          // If no utterances found (including when voice was deactivated), approve stop
+          // Voice was deactivated during the wait
           return {
             decision: 'approve' as const,
-            reason: data.message || 'No utterances found during wait'
+            reason: 'Voice input deactivated'
           };
         } catch (error) {
           debugLog(`[Stop Hook] Error calling wait_for_utterance: ${error}`);
@@ -1114,13 +1352,14 @@ app.get('/api/debug/pipeline/:sessionId', (req: Request, res: Response) => {
 app.post('/api/sessions/register', async (req: Request, res: Response) => {
   console.log('[API /api/sessions/register] POST request received');
   console.log('[API /api/sessions/register] Request body:', JSON.stringify(req.body));
-  const { triggerWord, triggerAliases } = req.body;
+  const { triggerWord, triggerAliases, ownerPids } = req.body;
 
   try {
-    console.log(`[API /api/sessions/register] Creating session with triggerWord=${triggerWord}, aliases=${triggerAliases}`);
+    console.log(`[API /api/sessions/register] Creating session with triggerWord=${triggerWord}, aliases=${triggerAliases}, ownerPids=${ownerPids}`);
     const session = await sessionManager.createSession({
       triggerWord,
-      triggerAliases
+      triggerAliases,
+      ownerPids: ownerPids || [],
     });
 
     console.log(`[API /api/sessions/register] SUCCESS - Created session: ${session.sessionId} with trigger: ${session.triggerWord}`);
@@ -1405,15 +1644,19 @@ app.get('/messenger', (_req: Request, res: Response) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-// Start HTTP server
-app.listen(HTTP_PORT, async () => {
+// Track if we're the primary HTTP server (first instance to bind)
+let isPrimaryHttpServer = false;
+
+// Start HTTP server with error handling for multiple instances
+const httpServer = app.listen(HTTP_PORT, async () => {
+  isPrimaryHttpServer = true;
   if (!IS_MCP_MANAGED) {
     console.log(`[HTTP] Server listening on http://localhost:${HTTP_PORT}`);
     console.log(`[Mode] Running in ${IS_MCP_MANAGED ? 'MCP-managed' : 'standalone'} mode`);
   } else {
     // In MCP mode, write to stderr to avoid interfering with protocol
     console.error(`[HTTP] Server listening on http://localhost:${HTTP_PORT}`);
-    console.error(`[Mode] Running in MCP-managed mode`);
+    console.error(`[Mode] Running in MCP-managed mode (primary server)`);
   }
 
   // Start session cleanup task (cleanup every 5 minutes, sessions inactive for 1 hour)
@@ -1442,6 +1685,19 @@ app.listen(HTTP_PORT, async () => {
   }
 });
 
+httpServer.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    // Port already in use - another instance has the HTTP server running
+    // This is expected when multiple Claude instances connect
+    console.error(`[HTTP] Port ${HTTP_PORT} already in use - connecting to existing server`);
+    console.error(`[Mode] Running in MCP-managed mode (secondary instance)`);
+    // Continue with MCP setup - we'll use the existing HTTP server for registration
+  } else {
+    console.error(`[HTTP] Server error:`, error);
+    process.exit(1);
+  }
+});
+
 // Helper function to get voice response reminder (uses legacy global state for backward compat)
 function getVoiceResponseReminder(): string {
   // Note: This function is used for formatting hook responses
@@ -1455,8 +1711,8 @@ if (IS_MCP_MANAGED) {
   console.error('[MCP] Initializing MCP server...');
   console.error('[MCP] IS_MCP_MANAGED=true, setting up MCP protocol handlers');
 
-  // Store the session ID for this MCP instance
-  let mcpSessionId: string | null = null;
+  // Centralized session client - handles all session operations via HTTP
+  const sessionClient = new McpSessionClient();
 
   const mcpServer = new Server(
     {
@@ -1473,26 +1729,13 @@ if (IS_MCP_MANAGED) {
   // Tool handlers
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
     console.error('[MCP] ListToolsRequestSchema called - Claude is requesting available tools');
-    console.error('[MCP] Current session count:', sessionManager.getActiveSessions().length);
 
-    // Auto-register a session for this Claude instance if not already registered
-    if (!mcpSessionId) {
-      try {
-        const session = await sessionManager.createSession();
-        mcpSessionId = session.sessionId;
-        console.error(`[MCP] Auto-registered session: ${mcpSessionId} with trigger word: ${session.triggerWord}`);
-
-        // Notify any connected browsers about the new session via SSE
-        notifyAllClients({
-          type: 'session_created',
-          sessionId: session.sessionId,
-          triggerWord: session.triggerWord,
-        });
-      } catch (error) {
-        console.error(`[MCP] Failed to auto-register session: ${error}`);
-      }
-    } else {
-      console.error(`[MCP] Session already registered: ${mcpSessionId}`);
+    // Auto-register session via centralized client
+    try {
+      const { sessionId, triggerWord } = await sessionClient.register();
+      console.error(`[MCP] Session registered: ${sessionId} with trigger: ${triggerWord}`);
+    } catch (error) {
+      console.error(`[MCP] Failed to register session: ${error}`);
     }
     return {
       tools: [
@@ -1560,6 +1803,28 @@ if (IS_MCP_MANAGED) {
             },
           },
         },
+        {
+          name: 'reconnect_session',
+          description: 'Force re-register the voice session. Use this if other voice tools return "Session not found" errors.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'set_voice_input',
+          description: 'Enable or disable voice input listening for this session. When enabled, the stop hook will keep Claude in a listening loop. When disabled, Claude can stop normally.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              active: {
+                type: 'boolean',
+                description: 'Whether voice input should be active (true) or inactive (false)',
+              },
+            },
+            required: ['active'],
+          },
+        },
       ]
     };
   });
@@ -1568,214 +1833,91 @@ if (IS_MCP_MANAGED) {
     const { name, arguments: args } = request.params;
 
     try {
+      // All tools use the centralized sessionClient for HTTP-based operations
       if (name === 'speak') {
         const text = args?.text as string;
-
         if (!text || !text.trim()) {
           return {
-            content: [
-              {
-                type: 'text',
-                text: 'Error: Text is required for speak tool',
-              },
-            ],
+            content: [{ type: 'text', text: 'Error: Text is required for speak tool' }],
             isError: true,
           };
         }
 
-        // Ensure we have a session for this MCP instance
-        if (!mcpSessionId) {
-          console.error('[MCP] Warning: speak called without a registered session, attempting auto-register');
-          try {
-            const session = await sessionManager.createSession();
-            mcpSessionId = session.sessionId;
-            console.error(`[MCP] Late-registered session: ${mcpSessionId}`);
-          } catch (error) {
-            return {
-              content: [{ type: 'text', text: 'Error: No session registered for this Claude instance' }],
-              isError: true,
-            };
-          }
-        }
-
-        const response = await fetch(`http://localhost:${HTTP_PORT}/api/speak?sessionId=${mcpSessionId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        });
-
-        const data = await response.json() as any;
-
-        if (response.ok) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: '',  // Return empty string for success
-              },
-            ],
-          };
-        } else {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Error speaking text: ${data.error || 'Unknown error'}`,
-              },
-            ],
-            isError: true,
-          };
-        }
+        await sessionClient.speak(text);
+        return { content: [{ type: 'text', text: '' }] };
       }
 
-      // Helper to ensure session exists
-      const ensureSession = async () => {
-        if (!mcpSessionId) {
-          const session = await sessionManager.createSession();
-          mcpSessionId = session.sessionId;
-          console.error(`[MCP] Auto-registered session: ${mcpSessionId}`);
-        }
-        return sessionManager.getSession(mcpSessionId);
-      };
-
       if (name === 'get_session_info') {
-        const session = await ensureSession();
-        if (!session) {
-          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
-        }
-
-        const pendingCount = session.queue.utterances.filter(u => u.status === 'pending').length;
-        const deliveredCount = session.queue.utterances.filter(u => u.status === 'delivered').length;
-
+        const info = await sessionClient.getSessionInfo();
         return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              sessionId: session.sessionId,
-              triggerWord: session.triggerWord,
-              triggerAliases: session.triggerAliases,
-              voiceResponsesEnabled: session.voiceResponsesEnabled,
-              voiceInputActive: session.voiceInputActive,
-              pendingMessages: pendingCount,
-              deliveredMessages: deliveredCount,
-              totalMessages: session.queue.messages.length,
-              createdAt: session.createdAt,
-              lastActivityAt: session.lastActivityAt,
-            }, null, 2),
-          }],
+          content: [{ type: 'text', text: JSON.stringify(info, null, 2) }],
         };
       }
 
       if (name === 'get_pending_messages') {
-        const session = await ensureSession();
-        if (!session) {
-          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
-        }
-
-        const pending = session.queue.utterances
-          .filter(u => u.status === 'pending')
-          .map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp }));
-
+        const { count, messages } = await sessionClient.getPendingMessages();
         return {
           content: [{
             type: 'text',
-            text: pending.length > 0
-              ? JSON.stringify({ count: pending.length, messages: pending }, null, 2)
+            text: count > 0
+              ? JSON.stringify({ count, messages }, null, 2)
               : 'No pending messages',
           }],
         };
       }
 
       if (name === 'wait_for_utterance') {
-        const session = await ensureSession();
-        if (!session) {
-          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
-        }
-
         const timeoutSeconds = Math.min(args?.timeout_seconds as number || 60, WAIT_TIMEOUT_SECONDS);
-        const startTime = Date.now();
-        const timeoutMs = timeoutSeconds * 1000;
-
-        // Poll for messages
-        while (Date.now() - startTime < timeoutMs) {
-          const pending = session.queue.utterances.filter(u => u.status === 'pending');
-
-          if (pending.length > 0) {
-            // Mark as delivered
-            pending.forEach(u => session.queue.markDelivered(u.id));
-
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  messages: pending.map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp })),
-                  waitTime: Date.now() - startTime,
-                }, null, 2),
-              }],
-            };
-          }
-
-          // Wait 500ms before checking again
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
+        const result = await sessionClient.waitForUtterance(timeoutSeconds);
         return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ success: false, message: 'Timeout waiting for utterance', waitTime: timeoutMs }),
-          }],
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       }
 
       if (name === 'dequeue_utterances') {
-        const session = await ensureSession();
-        if (!session) {
-          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
-        }
-
-        const pending = session.queue.utterances.filter(u => u.status === 'pending');
-
-        if (pending.length === 0) {
+        const { utterances } = await sessionClient.dequeueMessages();
+        if (!utterances || utterances.length === 0) {
           return { content: [{ type: 'text', text: 'No pending messages to dequeue' }] };
         }
-
-        // Mark as delivered
-        pending.forEach(u => session.queue.markDelivered(u.id));
-
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              count: pending.length,
-              messages: pending.map(u => ({ id: u.id, text: u.text, timestamp: u.timestamp })),
+              count: utterances.length,
+              messages: utterances,
             }, null, 2),
           }],
         };
       }
 
       if (name === 'get_conversation_history') {
-        const session = await ensureSession();
-        if (!session) {
-          return { content: [{ type: 'text', text: 'Error: Session not found' }], isError: true };
-        }
-
         const limit = args?.limit as number || 50;
-        const messages = session.queue.getRecentMessages(limit);
-
+        const messages = await sessionClient.getConversationHistory(limit);
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({
-              count: messages.length,
-              messages: messages.map(m => ({
-                id: m.id,
-                role: m.role,
-                text: m.text,
-                timestamp: m.timestamp,
-                status: m.status,
-              })),
-            }, null, 2),
+            text: JSON.stringify({ count: messages.length, messages }, null, 2),
+          }],
+        };
+      }
+
+      if (name === 'reconnect_session') {
+        const { sessionId, triggerWord } = await sessionClient.reconnect();
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ reconnected: true, sessionId, triggerWord }, null, 2),
+          }],
+        };
+      }
+
+      if (name === 'set_voice_input') {
+        const active = args?.active as boolean;
+        const result = await sessionClient.setVoiceInput(active);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(result, null, 2),
           }],
         };
       }
@@ -1783,12 +1925,7 @@ if (IS_MCP_MANAGED) {
       throw new Error(`Unknown tool: ${name}`);
     } catch (error) {
       return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
+        content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
         isError: true,
       };
     }
@@ -1799,6 +1936,12 @@ if (IS_MCP_MANAGED) {
   mcpServer.connect(transport);
   // Use stderr in MCP mode to avoid interfering with protocol
   console.error('[MCP] Server connected via stdio');
+
+  // Clean up session files on exit
+  const cleanup = () => cleanupSessionFiles(sessionClient['sessionFilePaths']);
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 } else {
   // Only log in standalone mode
   if (!IS_MCP_MANAGED) {
